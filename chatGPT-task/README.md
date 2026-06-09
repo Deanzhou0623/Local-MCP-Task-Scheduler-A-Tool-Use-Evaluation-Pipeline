@@ -1,54 +1,46 @@
-# ChatGPT Task — Real MCP Task Scheduler
+# ChatGPT Task — Real MCP Task Scheduler (Spec 01)
 
-A small, working MCP server that lets an MCP client (Claude Desktop, Claude
-Code, or the MCP inspector) schedule and review tasks through standardized tool
-calls. It is a ChatGPT Tasks-inspired scheduler built on the Python MCP SDK and
-`FastMCP`.
+A local MCP task scheduler that lets a user or LLM client manage scheduled jobs
+through stable, versioned tools backed by a FastAPI service and durable SQLite
+storage. This implements [Spec 01](../docs/spec01_real_mcp_scheduler_core.md):
+the four core flows are **create**, **view**, **modify**, and **delete** a job.
 
 ## What it does
 
-- Exposes MCP tools to create, list, check, and cancel scheduled tasks.
-- Persists jobs to SQLite via SQLAlchemy 2.0.
-- Runs a background **watcher** that scans for due jobs by hourly time bucket.
-- Pushes due jobs into an in-memory queue consumed by a background **worker**
-  that executes a placeholder action and records the result.
+- Exposes MCP tools (`task.create@v1`, `task.list@v1`, `task.get@v1`,
+  `task.modify@v1`, `task.delete@v1`) that route through a dictionary registry.
+- Mirrors those tools as a REST API under `/v1/jobs` (FastAPI + Pydantic).
+- Supports **immediate**, **one_time**, and **recurring** (cron) jobs with IANA
+  timezones.
+- Persists job definitions in `jobs` and execution attempts in `job_runs`
+  (SQLAlchemy 2.0).
+- Runs a background **watcher** that scans for due runs by hourly UTC time
+  bucket, pushes them onto an in-memory queue, and a **worker** that executes
+  each run and (for recurring jobs) schedules the next one.
+- Returns one structured error envelope for every failure across both surfaces.
 
 ```txt
-MCP Client
-    |
-    v
-FastMCP Server
-    |
-    v
-Tool handlers
-    |
-    v
-SQLite Jobs DB
-    ^
-    |
-Watcher scans due jobs -> in-memory queue -> Worker executes jobs
+MCP client / REST client
+        |
+   tool registry  /  FastAPI routes
+        |
+   service layer (create/list/get/modify/delete)
+        |
+   SQLite: jobs + job_runs
+        ^
+        |
+watcher (due runs by time bucket) -> in-memory queue -> worker -> next run
 ```
 
-## Project structure
+## Layout
 
-```txt
-chatGPT-task/
-|-- README.md
-|-- requirements.txt
-|-- .env.example
-|-- app/
-|   |-- __init__.py
-|   |-- database.py      # engine, SessionLocal, Base, get_db
-|   |-- models.py        # Job model + status constants
-|   |-- scheduler.py     # time buckets, watcher_loop, worker_loop
-|   `-- mcp_server.py    # FastMCP server, tool handlers, tools
-`-- tests/
-    |-- __init__.py
-    |-- conftest.py
-    |-- test_models.py
-    |-- test_scheduler.py
-    `-- test_tool_handlers.py
-```
+| Path | Responsibility |
+| --- | --- |
+| `app/core/` | database, errors, ids, time utilities, deterministic clock |
+| `app/jobs/` | job models, schemas, service logic, action allow-list |
+| `app/scheduler/` | watcher, worker, queue, and testable scheduler helpers |
+| `app/mcp/` | `TOOL_REGISTRY`, `dispatch()`, and FastMCP server wiring |
+| `app/api/` | FastAPI app, routes, exception handlers, dependencies |
 
 ## Setup
 
@@ -56,65 +48,64 @@ chatGPT-task/
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
-python -m app.mcp_server
 ```
 
-Copy `.env.example` to `.env` if you want to override defaults:
+Copy `.env.example` to `.env` to override `DATABASE_URL` / `WATCHER_INTERVAL`.
+
+## Run
+
+MCP server (starts the watcher + worker threads):
 
 ```bash
-cp .env.example .env
+python -m app.mcp.server
 ```
 
-## Run with the MCP inspector
+REST API:
 
 ```bash
-npx @modelcontextprotocol/inspector python -m app.mcp_server
+uvicorn app.api:app --reload
 ```
 
-The inspector lets you list the registered tools and invoke them manually.
+Inspect the MCP tools manually:
 
-## Connect to Claude Desktop
+```bash
+npx @modelcontextprotocol/inspector python -m app.mcp.server
+```
 
-Add an entry to your Claude Desktop MCP config (e.g.
-`claude_desktop_config.json`):
+## Tools
+
+| Tool | API endpoint | Purpose |
+| --- | --- | --- |
+| `task.create@v1` | `POST /v1/jobs` | Create a job and its first run |
+| `task.list@v1` | `GET /v1/jobs` | List a user's jobs |
+| `task.get@v1` | `GET /v1/jobs/{job_id}` | View one job and recent runs |
+| `task.modify@v1` | `PATCH /v1/jobs/{job_id}` | Modify a job, recompute runs |
+| `task.delete@v1` | `DELETE /v1/jobs/{job_id}` | Soft-delete a job |
+
+Every request requires `user_id` to enforce the ownership boundary. Example
+create arguments:
 
 ```json
 {
-  "mcpServers": {
-    "task-scheduler": {
-      "command": "python",
-      "args": ["-m", "app.mcp_server"],
-      "cwd": "/absolute/path/to/chatGPT-task"
-    }
-  }
+  "user_id": "user_123",
+  "action": "summarize_financial_news",
+  "job_params": { "type": "recurring", "schedule": "0 8 * * *", "timezone": "America/Vancouver" }
 }
 ```
 
-Restart Claude Desktop and the `task_*` tools will appear.
+If a `one_time` or `recurring` job omits `job_params.timezone`, `task.create@v1`
+returns a structured validation error. The scheduler does not infer a timezone;
+the LLM or eval harness must provide an explicit IANA timezone. Immediate jobs
+may omit timezone.
 
-## Try the tools
+## Error contract
 
-The server registers four tools:
-
-| Tool          | Description                                          |
-| ------------- | ---------------------------------------------------- |
-| `task_create` | Schedule a new task for future execution.            |
-| `task_list`   | List all scheduled tasks.                            |
-| `task_status` | Get the status of a scheduled task by `job_id`.      |
-| `task_cancel` | Cancel a scheduled task that has not completed yet.  |
-
-Example flow:
-
-```txt
-Schedule a task to review PR #123 tomorrow at 9am.
-  -> task_create -> { "job_id": 1, "status": "pending", ... }
-
-What's the status of that task?
-  -> task_status -> { "job_id": 1, "status": "completed", "result": "Executed: ..." }
+```json
+{ "ok": false, "error": { "code": "VALIDATION_ERROR", "message": "...", "field": "job_params.schedule", "expected": "cron expression" } }
 ```
 
-`task_create` takes a `description` and an ISO 8601 `scheduled_at`
-(e.g. `2026-06-09T09:00:00`).
+Codes: `VALIDATION_ERROR`, `NOT_FOUND`, `PERMISSION_DENIED`, `CONFLICT`,
+`UNSUPPORTED_ACTION`, `INTERNAL_ERROR`.
 
 ## Tests
 
@@ -122,18 +113,8 @@ What's the status of that task?
 pytest
 ```
 
-If dependencies are not yet installed:
+## MCP stdio caveat
 
-```bash
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
-pytest
-```
-
-## Troubleshooting — MCP stdio and stdout
-
-MCP stdio uses **stdout** for protocol messages. The server therefore never
-calls `print()` to stdout — diagnostic messages are written to **stderr**. If
-you add logging, keep it on stderr or write to a file. Stray stdout output will
-corrupt the MCP protocol stream and break the connection.
+MCP stdio uses **stdout** for protocol messages, so `app/mcp/server.py` never
+prints to stdout — diagnostics go to stderr. Stray stdout output corrupts the
+protocol stream.

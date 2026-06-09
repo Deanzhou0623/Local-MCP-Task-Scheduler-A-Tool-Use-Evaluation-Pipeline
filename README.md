@@ -89,28 +89,25 @@ Job status and result
 The first MCP server exposes these tools:
 
 ```txt
-task.create
-task.list
-task.status
-task.cancel
+task.create@v1
+task.list@v1
+task.get@v1
+task.modify@v1
+task.delete@v1
 ```
 
-Initial `task.create` arguments:
+The LLM or eval harness must provide strict scheduler arguments. For local-time
+schedules, resolve relative time and timezone before calling `task.create@v1`:
 
 ```json
 {
-  "description": "review PR #123",
-  "scheduled_at": "2026-06-09T09:00:00"
-}
-```
-
-Example response:
-
-```json
-{
-  "job_id": 1,
-  "status": "pending",
-  "scheduled_at": "2026-06-09 09:00:00"
+  "user_id": "user_123",
+  "action": "summarize_financial_news",
+  "job_params": {
+    "type": "recurring",
+    "schedule": "0 8 * * *",
+    "timezone": "America/Vancouver"
+  }
 }
 ```
 
@@ -123,22 +120,32 @@ Each tool should include:
 - Enum values
 - Structured validation errors
 
-Example `task.create` schema:
+Example `task.create@v1` schema:
 
 ```json
 {
   "type": "object",
   "additionalProperties": false,
-  "required": ["description", "scheduled_at"],
+  "required": ["user_id", "action", "job_params"],
   "properties": {
-    "description": {
+    "user_id": {
       "type": "string",
-      "description": "What the task should do."
+      "description": "Owner boundary for the job."
     },
-    "scheduled_at": {
+    "action": {
       "type": "string",
-      "format": "date-time",
-      "description": "When to run the task, in ISO 8601 format."
+      "description": "Supported action name."
+    },
+    "job_params": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type"],
+      "properties": {
+        "type": { "enum": ["immediate", "one_time", "recurring"] },
+        "time": { "type": "string", "format": "date-time" },
+        "schedule": { "type": "string" },
+        "timezone": { "type": "string", "description": "IANA timezone." }
+      }
     }
   }
 }
@@ -257,7 +264,8 @@ DevOps later: Docker, Docker Compose, .env
 ```txt
 chatGPT-task/
 |-- docs/
-|   |-- feature01_real_mcp_scheduler_core.md
+|   |-- Q&A.md
+|   |-- spec01_real_mcp_scheduler_core.md
 |   |-- feature02_mcp_inspector_and_claude_desktop_testing.md
 |   |-- feature03_tool_schema_and_error_contract.md
 |   |-- feature04_integrate_external_apis.md
@@ -267,10 +275,11 @@ chatGPT-task/
 |   `-- feature08_results_analysis_and_iteration.md
 |-- chatGPT-task/
 |   |-- app/
-|   |   |-- database.py
-|   |   |-- models.py
-|   |   |-- scheduler.py
-|   |   `-- mcp_server.py
+|   |   |-- api/
+|   |   |-- core/
+|   |   |-- jobs/
+|   |   |-- mcp/
+|   |   `-- scheduler/
 |   |-- tests/
 |   |-- README.md
 |   `-- requirements.txt
@@ -287,13 +296,13 @@ cd chatGPT-task
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
-python -m app.mcp_server
+python -m app.mcp.server
 ```
 
 Test with MCP Inspector:
 
 ```bash
-npx @modelcontextprotocol/inspector python -m app.mcp_server
+npx @modelcontextprotocol/inspector python -m app.mcp.server
 ```
 
 Run tests:
@@ -324,23 +333,26 @@ DATABASE_URL=sqlite:///./chatgpt_task.db
 
 The first real MCP MVP is complete when:
 
-- `python -m app.mcp_server` starts a real MCP server.
+- `python -m app.mcp.server` starts a real MCP server.
 - MCP Inspector can connect to the server.
 - Claude Desktop can load the local MCP server as a testing client.
-- `task_create` creates a SQLite job.
+- `task.create@v1` creates a SQLite job.
 - The watcher finds due jobs.
 - The worker executes queued jobs and marks them completed.
-- `task_list` returns scheduled jobs.
-- `task_status` returns one job status.
-- `task_cancel` cancels a non-terminal job.
+- `task.list@v1` returns scheduled jobs.
+- `task.get@v1` returns one job status.
+- `task.modify@v1` modifies a scheduled job.
+- `task.delete@v1` deletes a non-terminal job.
 - Tool schemas and structured errors are documented.
 
 ## Roadmap
 
-The roadmap is organized as independent feature specs under `docs/`:
+The roadmap is organized as independent specs under `docs/`:
 
-1. [Feature 01: Real MCP Scheduler Core](docs/feature01_real_mcp_scheduler_core.md)
-   Build the local MCP server, SQLite job store, watcher, in-memory queue, worker, and basic task tools.
+Questions and design-review notes are recorded in [Q&A.md](docs/Q&A.md).
+
+1. [Spec 01: Real MCP Scheduler Core](docs/spec01_real_mcp_scheduler_core.md)
+   Build the local MCP server, SQLite job store, watcher, in-memory queue, worker, and create/view/modify/delete task tools.
 
 2. [Feature 02: MCP Inspector And Claude Desktop Testing](docs/feature02_mcp_inspector_and_claude_desktop_testing.md)
    Verify the MCP server with MCP Inspector first, then connect Claude Desktop as the first natural-language testing client.
