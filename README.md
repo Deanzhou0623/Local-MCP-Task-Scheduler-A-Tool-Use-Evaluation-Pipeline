@@ -365,10 +365,51 @@ The roadmap is organized as independent feature specs under `docs/`:
 
 ## References
 
-- Anthropic Engineering Blog: [Demystifying AI Evals for Agents](https://www.anthropic.com/engineering/demystifying-evals-for-ai-agents)
-- Model Context Protocol: [Tools Documentation](https://modelcontextprotocol.io/specification/2025-06-18/server/tools)
-- Model Context Protocol: [Basic / JSON Schema Documentation](https://modelcontextprotocol.io/specification/2025-11-25/basic)
-- OpenAI, Anthropic, and Gemini tool-calling documentation for provider-specific behavior.
+1. Anthropic Engineering Blog: [Demystifying AI Evals for Agents](https://www.anthropic.com/engineering/demystifying-evals-for-ai-agents)
+
+   Used for the eval loop:
+
+   ```txt
+   task dataset -> model run -> grader -> failure analysis -> improve -> rerun
+   ```
+
+2. Model Context Protocol: [Tools Documentation](https://modelcontextprotocol.io/specification/2025-06-18/server/tools)
+
+   Used for the real MCP tool layer:
+
+   ```txt
+   tool name
+   tool description
+   tool metadata
+   tool list
+   input schema
+   structured tool result
+   structured error
+   ```
+
+3. OpenAI API Docs: [Structured Outputs](https://platform.openai.com/docs/guides/structured-outputs) and [Function Calling](https://platform.openai.com/docs/guides/function-calling)
+
+   Used for schema design and stable model output:
+
+   ```txt
+   strict JSON schema
+   structured output
+   function/tool calling
+   schema design
+   validation
+   ```
+
+4. OpenAI Cookbook: [Structured Outputs Intro](https://cookbook.openai.com/examples/structured_outputs_intro) and [Getting Started with OpenAI Evals](https://cookbook.openai.com/examples/evaluation/getting_started_with_openai_evals)
+
+   Used for runnable examples of structured-output testing, grading, and iteration:
+
+   ```txt
+   runnable eval examples
+   structured output checks
+   grader logic
+   result analysis
+   iteration loop
+   ```
 
 ## Notes
 
