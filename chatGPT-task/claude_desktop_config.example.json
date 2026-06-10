@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "task-scheduler": {
+      "command": "/Users/deanzhou/Desktop/projects/Local-MCP-Task-Scheduler-A-Tool-Use-Evaluation-Pipeline/chatGPT-task/.venv/bin/python",
+      "args": ["-m", "app.mcp.server"],
+      "cwd": "/Users/deanzhou/Desktop/projects/Local-MCP-Task-Scheduler-A-Tool-Use-Evaluation-Pipeline/chatGPT-task"
+    }
+  }
+}
