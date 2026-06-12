@@ -23,7 +23,7 @@ from app.core.errors import (
     AppError,
 )
 from app.core.ids import new_job_id, new_run_id
-from app.jobs.actions import is_supported
+from app.jobs.actions import SUPPORTED_ACTIONS, is_supported
 from app.jobs.models import (
     JOB_COMPLETED,
     JOB_DELETED,
@@ -229,6 +229,7 @@ def create_job(db: Session, req: CreateJobRequest) -> dict:
             UNSUPPORTED_ACTION,
             f"Action '{req.action}' is not supported.",
             field="action",
+            expected=sorted(SUPPORTED_ACTIONS),
         )
 
     p: JobParamsCreate = req.job_params
@@ -386,6 +387,7 @@ def modify_job(db: Session, *, job_id: str, req: ModifyJobRequest) -> dict:
             UNSUPPORTED_ACTION,
             f"Action '{new_action}' is not supported.",
             field="action",
+            expected=sorted(SUPPORTED_ACTIONS),
         )
 
     p = req.job_params

@@ -48,7 +48,13 @@ def _validation_envelope(exc: ValidationError) -> dict:
     first = exc.errors()[0]
     loc = [str(p) for p in first.get("loc", ()) if p not in ("body",)]
     field = ".".join(loc) or None
-    return error_envelope(VALIDATION_ERROR, first.get("msg", "Invalid input."), field=field)
+    expected = first.get("ctx", {}).get("expected")
+    return error_envelope(
+        VALIDATION_ERROR,
+        first.get("msg", "Invalid input."),
+        field=field,
+        expected=expected,
+    )
 
 
 def _parse(model: type[BaseModel], args: dict | None):

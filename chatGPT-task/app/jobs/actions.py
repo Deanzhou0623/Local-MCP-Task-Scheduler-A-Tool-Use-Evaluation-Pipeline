@@ -16,6 +16,7 @@ SUPPORTED_ACTIONS: frozenset[str] = frozenset(
         "summarize_financial_news",
         "review_pr",
         "send_email",
+        "send_reminder",
         "fetch_news",
         "generate_report",
     }

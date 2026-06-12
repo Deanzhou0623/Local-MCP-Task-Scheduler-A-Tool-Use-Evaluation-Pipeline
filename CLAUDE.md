@@ -35,7 +35,7 @@ The code is organized into packages under `app/`: `app/core/` (database, errors,
 The central rule: **`app/jobs/service.py` is the single source of truth.** Two surfaces call into it and must stay behavior-identical:
 
 - `app/api/routes.py` — FastAPI REST routes (`POST/GET/PATCH/DELETE /v1/jobs`); `app/api/server.py` builds the app (importable as `app.api:app`).
-- `app/mcp/registry.py` — the MCP `TOOL_REGISTRY` (`task.create@v1`, `task.list@v1`, `task.get@v1`, `task.modify@v1`, `task.delete@v1`) and `dispatch()`. `app/mcp/server.py` is a thin FastMCP layer that builds an `args` dict and routes through `dispatch()`.
+- `app/mcp/registry.py` — the internal `TOOL_REGISTRY` and `dispatch()` contract. `app/mcp/server.py` is a thin FastMCP layer that exposes Claude-compatible names like `task_create_v1`, builds an `args` dict, and routes through `dispatch()`.
 
 When changing a flow, edit the service function once; do not fork logic into a route or a tool handler.
 
@@ -49,7 +49,7 @@ Execution pipeline (`app/scheduler/`): `watcher_loop` (in `watcher.py`) scans on
 - **One error contract.** Service code raises `AppError(code, message, field=?, expected=?)` from `app/core/errors.py`; both surfaces convert it to `{"ok": false, "error": {...}}`. Codes: `VALIDATION_ERROR`, `NOT_FOUND`, `PERMISSION_DENIED`, `CONFLICT`, `UNSUPPORTED_ACTION`, `INTERNAL_ERROR`. Add new failure modes as an `AppError`, not an ad-hoc dict.
 - **Pydantic models use `extra="forbid"`** (`app/jobs/schemas.py`) — unknown fields are a `VALIDATION_ERROR`, matching the spec's "extra fields are rejected".
 - **`action` must be in the allow-list** in `app/jobs/actions.py`, else `UNSUPPORTED_ACTION`. Execution is a placeholder; Spec 04 (traceable action execution) adds an executor interface over simple/mock actions — real external calls are out of scope.
-- **Tool names keep the `@v1` suffix** (e.g. `task.create@v1`). FastMCP logs a name-format warning for the `@`; it is harmless (registration proceeds) and the registry keys are the contract the eval pipeline targets — do not rename to silence the warning.
+- **Public MCP tool names must be Claude-compatible** (e.g. `task_create_v1`). Claude Desktop rejects names containing `.` or `@`, so `app/mcp/server.py` exposes safe names while dispatching through the internal registry keys.
 - **MCP stdio uses stdout for protocol**, so `app/mcp/server.py` must never `print()` to stdout — diagnostics go to stderr.
 
 ## Testing notes

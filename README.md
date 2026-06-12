@@ -89,25 +89,23 @@ Job status and result
 The first MCP server exposes these tools:
 
 ```txt
-task.create@v1
-task.list@v1
-task.get@v1
-task.modify@v1
-task.delete@v1
+task_create_v1
+task_list_v1
+task_get_v1
+task_modify_v1
+task_delete_v1
 ```
 
 The LLM or eval harness must provide strict scheduler arguments. For local-time
-schedules, resolve relative time and timezone before calling `task.create@v1`:
+schedules, resolve relative time and timezone before calling `task_create_v1`:
 
 ```json
 {
   "user_id": "user_123",
   "action": "summarize_financial_news",
-  "job_params": {
-    "type": "recurring",
-    "schedule": "0 8 * * *",
-    "timezone": "America/Vancouver"
-  }
+  "type": "recurring",
+  "schedule": "0 8 * * *",
+  "timezone": "America/Vancouver"
 }
 ```
 
@@ -120,13 +118,12 @@ Each tool should include:
 - Enum values
 - Structured validation errors
 
-Example `task.create@v1` schema:
+Example `task_create_v1` schema:
 
 ```json
 {
   "type": "object",
-  "additionalProperties": false,
-  "required": ["user_id", "action", "job_params"],
+  "required": ["user_id", "action", "type"],
   "properties": {
     "user_id": {
       "type": "string",
@@ -134,19 +131,12 @@ Example `task.create@v1` schema:
     },
     "action": {
       "type": "string",
-      "description": "Supported action name."
+      "description": "Supported action name, such as send_reminder or generate_report."
     },
-    "job_params": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["type"],
-      "properties": {
-        "type": { "enum": ["immediate", "one_time", "recurring"] },
-        "time": { "type": "string", "format": "date-time" },
-        "schedule": { "type": "string" },
-        "timezone": { "type": "string", "description": "IANA timezone." }
-      }
-    }
+    "type": { "type": "string", "description": "immediate, one_time, or recurring" },
+    "time": { "type": "string", "format": "date-time" },
+    "schedule": { "type": "string" },
+    "timezone": { "type": "string", "description": "IANA timezone." }
   }
 }
 ```
@@ -336,13 +326,13 @@ The first real MCP MVP is complete when:
 - `python -m app.mcp.server` starts a real MCP server.
 - MCP Inspector can connect to the server.
 - Claude Desktop can load the local MCP server as a testing client.
-- `task.create@v1` creates a SQLite job.
+- `task_create_v1` creates a SQLite job.
 - The watcher finds due jobs.
 - The worker executes queued jobs and marks them completed.
-- `task.list@v1` returns scheduled jobs.
-- `task.get@v1` returns one job status.
-- `task.modify@v1` modifies a scheduled job.
-- `task.delete@v1` deletes a non-terminal job.
+- `task_list_v1` returns scheduled jobs.
+- `task_get_v1` returns one job status.
+- `task_modify_v1` modifies a scheduled job.
+- `task_delete_v1` deletes a non-terminal job.
 - Tool schemas and structured errors are documented.
 
 ## Roadmap

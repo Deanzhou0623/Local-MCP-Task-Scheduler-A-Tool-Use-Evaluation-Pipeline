@@ -54,7 +54,7 @@ Those belong to later specs.
 - Claude Desktop is the natural-language testing client.
 - The scheduler receives explicit MCP arguments only.
 - Relative phrases such as "tomorrow at 8" are resolved before
-  `task.create@v1`.
+  `task_create_v1`.
 - City names such as "Vancouver" are resolved outside the scheduler.
 - The scheduler validates `America/Vancouver`; it does not infer it.
 - Unsupported action names return `UNSUPPORTED_ACTION`.
@@ -93,11 +93,11 @@ The MCP server exposes the Spec 01 task tools:
 
 | Tool | Purpose |
 | --- | --- |
-| `task.create@v1` | Create a job and first run. |
-| `task.list@v1` | List jobs for a user. |
-| `task.get@v1` | View one job and recent runs. |
-| `task.modify@v1` | Modify an existing job. |
-| `task.delete@v1` | Soft-delete a job and cancel pending runs. |
+| `task_create_v1` | Create a job and first run. |
+| `task_list_v1` | List jobs for a user. |
+| `task_get_v1` | View one job and recent runs. |
+| `task_modify_v1` | Modify an existing job. |
+| `task_delete_v1` | Soft-delete a job and cancel pending runs. |
 
 Tool names use `namespace.verb@version` so tool catalogs stay stable and eval
 traces can compare behavior across versions.
@@ -114,11 +114,11 @@ Schema requirements:
 
 | Tool | Use when | Do not use when |
 | --- | --- | --- |
-| `task.create@v1` | The request has explicit `action`, `job_params.type`, and required schedule fields. | The request still needs timezone, date, or action inference. |
-| `task.list@v1` | The user wants a list of jobs. | The user asks for one known job. |
-| `task.get@v1` | The user asks for one known job by ID. | The user needs broad job discovery. |
-| `task.modify@v1` | The user wants to edit an existing scheduled job. | The job is deleted, completed, running, or failed. |
-| `task.delete@v1` | The user wants to cancel/remove a scheduled job. | The user wants to edit job fields. |
+| `task_create_v1` | The request has explicit `action`, `job_params.type`, and required schedule fields. | The request still needs timezone, date, or action inference. |
+| `task_list_v1` | The user wants a list of jobs. | The user asks for one known job. |
+| `task_get_v1` | The user asks for one known job by ID. | The user needs broad job discovery. |
+| `task_modify_v1` | The user wants to edit an existing scheduled job. | The job is deleted, completed, running, or failed. |
+| `task_delete_v1` | The user wants to cancel/remove a scheduled job. | The user wants to edit job fields. |
 
 The server still enforces correctness even if a model chooses the wrong tool.
 
@@ -130,7 +130,7 @@ Claude Desktop or the eval harness should use instructions equivalent to:
 You are using a strict task scheduler MCP server.
 
 Do not rely on the scheduler to infer missing details. Before calling
-task.create@v1, resolve the user's request into explicit action,
+task_create_v1, resolve the user's request into explicit action,
 job_params.type, job_params.time or job_params.schedule, and
 job_params.timezone.
 
@@ -212,11 +212,11 @@ Call `tools/list`.
 Expected tools:
 
 ```txt
-task.create@v1
-task.list@v1
-task.get@v1
-task.modify@v1
-task.delete@v1
+task_create_v1
+task_list_v1
+task_get_v1
+task_modify_v1
+task_delete_v1
 ```
 
 Pass criteria:
@@ -227,7 +227,7 @@ Pass criteria:
 
 ### Create Immediate Job
 
-Call `task.create@v1`:
+Call `task_create_v1`:
 
 ```json
 {
@@ -246,7 +246,7 @@ Pass criteria:
 
 ### Create One-Time Job
 
-Call `task.create@v1`:
+Call `task_create_v1`:
 
 ```json
 {
@@ -268,7 +268,7 @@ Pass criteria:
 
 ### Reject Missing Timezone
 
-Call `task.create@v1`:
+Call `task_create_v1`:
 
 ```json
 {
@@ -291,10 +291,10 @@ Pass criteria:
 
 Required checks:
 
-- `task.list@v1` returns jobs for `user_id`.
-- `task.get@v1` returns one known `job_id`.
-- `task.modify@v1` changes only allowed fields.
-- `task.delete@v1` soft-deletes the job.
+- `task_list_v1` returns jobs for `user_id`.
+- `task_get_v1` returns one known `job_id`.
+- `task_modify_v1` changes only allowed fields.
+- `task_delete_v1` soft-deletes the job.
 - Missing IDs return `NOT_FOUND`.
 - Unknown patch fields are rejected.
 - Repeated delete is idempotent.
@@ -313,7 +313,7 @@ hidden context. Expected trace:
 1. Claude resolves "tomorrow" using client context or asks for clarification.
 2. Claude resolves the user's timezone or asks for it.
 3. Claude maps the request to a supported scheduler action.
-4. Claude calls `task.create@v1` with explicit arguments.
+4. Claude calls `task_create_v1` with explicit arguments.
 5. Scheduler validates and stores a placeholder job.
 6. Scheduler returns structured JSON.
 7. Claude summarizes the scheduled job.
@@ -323,7 +323,7 @@ tool call is:
 
 ```json
 {
-  "tool": "task.create@v1",
+  "tool": "task_create_v1",
   "args": {
     "user_id": "user_123",
     "action": "summarize_financial_news",
