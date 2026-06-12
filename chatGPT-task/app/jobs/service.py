@@ -9,6 +9,7 @@ surfaces emit the identical structured error contract.
 
 from __future__ import annotations
 
+import json
 from datetime import datetime
 
 from sqlalchemy import select
@@ -24,6 +25,7 @@ from app.core.errors import (
 )
 from app.core.ids import new_job_id, new_run_id
 from app.jobs.actions import SUPPORTED_ACTIONS, is_supported
+from app.jobs.executors import validate_action_params
 from app.jobs.models import (
     JOB_COMPLETED,
     JOB_DELETED,
@@ -35,6 +37,7 @@ from app.jobs.models import (
     TYPE_IMMEDIATE,
     TYPE_ONE_TIME,
     TYPE_RECURRING,
+    ActionTrace,
     Job,
     JobRun,
 )
@@ -43,6 +46,11 @@ from app.jobs.schemas import (
     JobParamsCreate,
     ListJobsParams,
     ModifyJobRequest,
+)
+from app.jobs.traces import (
+    latest_trace_for_run,
+    trace_summary_dict,
+    trace_to_dict,
 )
 from app.core.timeutils import (
     iso_in_tz,
@@ -62,6 +70,13 @@ RECENT_RUNS_LIMIT = 20
 # ---------------------------------------------------------------------------
 # Serializers
 # ---------------------------------------------------------------------------
+def job_action_params(job: Job) -> dict:
+    """Parse a job's stored ``action_params_json`` text into a dict (spec 04)."""
+    if not job.action_params_json:
+        return {}
+    return json.loads(job.action_params_json)
+
+
 def serialize_job(job: Job) -> dict:
     """Full job representation (job timestamps in UTC ``Z``; ``time`` in tz)."""
     return {
@@ -72,6 +87,7 @@ def serialize_job(job: Job) -> dict:
         "time": iso_in_tz(job.time, job.timezone),
         "schedule": job.schedule,
         "timezone": job.timezone,
+        "action_params": job_action_params(job),
         "status": job.status,
         "created_at": iso_utc(job.created_at),
         "updated_at": iso_utc(job.updated_at),
@@ -232,6 +248,10 @@ def create_job(db: Session, req: CreateJobRequest) -> dict:
             expected=sorted(SUPPORTED_ACTIONS),
         )
 
+    # Required action params are validated up front so the model gets fast,
+    # fixable feedback before any job is stored (spec 04, section 6).
+    validate_action_params(req.action, req.action_params)
+
     p: JobParamsCreate = req.job_params
     time_utc = _validate_type_params(
         p.type, time=p.time, schedule=p.schedule, tz=p.timezone
@@ -246,6 +266,9 @@ def create_job(db: Session, req: CreateJobRequest) -> dict:
         time=time_utc,
         schedule=p.schedule,
         timezone=job_timezone,
+        action_params_json=(
+            json.dumps(req.action_params) if req.action_params else None
+        ),
         status=JOB_SCHEDULED,
     )
     db.add(job)
@@ -346,18 +369,42 @@ def get_job(db: Session, *, job_id: str, user_id: str) -> dict:
         .limit(RECENT_RUNS_LIMIT)
     )
     runs = db.execute(stmt).scalars().all()
+
+    def _run_dict(run: JobRun) -> dict:
+        # Embed the run's trace summary so a user can inspect what happened
+        # without first knowing the trace id (spec 04, section 8).
+        trace = latest_trace_for_run(db, run.run_id)
+        return {
+            "run_id": run.run_id,
+            "scheduled_at": iso_in_tz(run.scheduled_at, job.timezone),
+            "status": run.status,
+            "trace": trace_summary_dict(trace) if trace is not None else None,
+        }
+
     return {
         "ok": True,
         "job": serialize_job(job),
-        "runs": [
-            {
-                "run_id": run.run_id,
-                "scheduled_at": iso_in_tz(run.scheduled_at, job.timezone),
-                "status": run.status,
-            }
-            for run in runs
-        ],
+        "runs": [_run_dict(run) for run in runs],
     }
+
+
+# ---------------------------------------------------------------------------
+# Flow 5: Trace lookup (spec 04)
+# ---------------------------------------------------------------------------
+def get_trace(db: Session, *, trace_id: str, user_id: str) -> dict:
+    """Return one execution trace and its ordered events, ownership-checked.
+
+    ``NOT_FOUND`` when the trace id is unknown; ``PERMISSION_DENIED`` when it
+    belongs to another user — mirroring ``_load_owned_job`` (spec 04, section 8).
+    """
+    trace = db.get(ActionTrace, trace_id)
+    if trace is None:
+        raise AppError(NOT_FOUND, "Trace not found.", field="trace_id")
+    if trace.user_id != user_id:
+        raise AppError(
+            PERMISSION_DENIED, "You do not own this trace.", field="user_id"
+        )
+    return {"ok": True, "trace": trace_to_dict(trace, events=True)}
 
 
 # ---------------------------------------------------------------------------
@@ -389,6 +436,14 @@ def modify_job(db: Session, *, job_id: str, req: ModifyJobRequest) -> dict:
             field="action",
             expected=sorted(SUPPORTED_ACTIONS),
         )
+
+    # Resolve action params (patch replaces; omitted keeps current) and validate
+    # the resulting config so a user can fix missing details before the run fires.
+    if req.action_params is not None:
+        target_action_params = req.action_params
+    else:
+        target_action_params = job_action_params(job)
+    validate_action_params(new_action, target_action_params)
 
     p = req.job_params
     target_type = (p.type if p and p.type else job.type)
@@ -426,6 +481,10 @@ def modify_job(db: Session, *, job_id: str, req: ModifyJobRequest) -> dict:
     job.schedule = target_schedule
     job.time = target_time_utc
     job.timezone = target_tz
+    if req.action_params is not None:
+        job.action_params_json = (
+            json.dumps(target_action_params) if target_action_params else None
+        )
 
     cancelled_count = 0
     new_run: JobRun | None = None

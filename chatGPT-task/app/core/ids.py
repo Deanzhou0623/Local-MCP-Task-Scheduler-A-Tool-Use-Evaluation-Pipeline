@@ -16,3 +16,11 @@ def new_job_id() -> str:
 
 def new_run_id() -> str:
     return f"run_{uuid.uuid4().hex}"
+
+
+def new_trace_id() -> str:
+    return f"trace_{uuid.uuid4().hex}"
+
+
+def new_trace_event_id() -> str:
+    return f"evt_{uuid.uuid4().hex}"

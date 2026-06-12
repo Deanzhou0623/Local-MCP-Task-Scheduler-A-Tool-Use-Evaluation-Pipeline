@@ -29,6 +29,7 @@ EXPECTED_TOOLS = [
     "task_get_v1",
     "task_list_v1",
     "task_modify_v1",
+    "task_trace_get_v1",
 ]
 
 
@@ -51,7 +52,7 @@ def _run(scenario):
 
 
 # --- Tool discovery (tools/list) ------------------------------------------
-def test_tools_list_exposes_exactly_the_five_task_tools(isolated_db):
+def test_tools_list_exposes_exactly_the_task_tools(isolated_db):
     async def scenario(client):
         return await client.list_tools()
 
@@ -139,6 +140,7 @@ def test_create_one_time_normalizes_natural_reminder_action(isolated_db):
                 "type": "one_time",
                 "time": "2026-06-10T16:30:00-07:00",
                 "timezone": "America/Vancouver",
+                "action_params": {"text": "Review the project."},
             },
         )
 
@@ -188,7 +190,12 @@ def test_unknown_natural_action_falls_back_to_reminder(isolated_db):
     async def scenario(client):
         return await client.call_tool(
             "task_create_v1",
-            {"user_id": USER, "action": "practice English", "type": "immediate"},
+            {
+                "user_id": USER,
+                "action": "practice English",
+                "type": "immediate",
+                "action_params": {"text": "Practice English."},
+            },
         )
 
     body = _body(_run(scenario))

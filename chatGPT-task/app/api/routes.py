@@ -24,11 +24,24 @@ from app.jobs.service import (
     create_job,
     delete_job,
     get_job,
+    get_trace,
     list_jobs,
     modify_job,
 )
 
 router = APIRouter(prefix="/v1/jobs", tags=["jobs"])
+
+# Execution traces live under their own resource (spec 04, section 8).
+trace_router = APIRouter(prefix="/v1/traces", tags=["traces"])
+
+
+@trace_router.get("/{trace_id}")
+def trace_detail(
+    trace_id: str,
+    user_id: str = Query(...),
+    db: Session = Depends(get_session),
+) -> dict:
+    return get_trace(db, trace_id=trace_id, user_id=user_id)
 
 
 @router.post("")

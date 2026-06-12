@@ -67,11 +67,12 @@ MVP trace model. Add these tables beside `jobs` and `job_runs`.
 
 ### `action_traces`
 
-One row per `JobRun` execution attempt.
+One row per `JobRun`. For Spec 04 a run executes at most once, so the
+relationship is 1:1 and `run_id` is unique.
 
 ```txt
 trace_id            string primary key, e.g. trace_...
-run_id              string, FK to job_runs.run_id
+run_id              string, FK to job_runs.run_id, unique
 job_id              string
 user_id             string
 action              string
@@ -79,10 +80,21 @@ status              pending | running | succeeded | failed | skipped
 started_at          datetime nullable
 finished_at         datetime nullable
 summary             text nullable
+artifact_json       text nullable   # serialized ActionResult.artifact
 error_message       text nullable
 created_at          datetime
 updated_at          datetime
 ```
+
+`artifact_json` stores the executor's `ActionResult.artifact` (e.g. a mock
+`message_id`) as JSON text; the serializer returns it as a dict.
+
+**Retry forward-compat (Spec 05).** `JobRun` already carries `retry_count`, and
+Spec 05 introduces real retries. When a run can execute more than once, the 1:1
+`run_id` uniqueness above no longer holds. Spec 05 must choose one of: a trace
+per attempt (add an `attempt` column and drop the unique constraint), or
+"latest attempt wins" (keep one trace, append events across attempts). Spec 04
+does not implement retries; it only avoids a schema that blocks either choice.
 
 ### `action_trace_events`
 
@@ -149,15 +161,35 @@ class ActionResult:
 
 The worker should:
 
-1. Create `ActionTrace`.
-2. Mark trace `running`.
+1. Create `ActionTrace` (status `pending`).
+2. Mark trace `running`, set `started_at`.
 3. Call the registered executor.
 4. Append trace events inside the executor.
-5. Mark trace `succeeded` or `failed`.
-6. Update `JobRun` status.
+5. Mark trace `succeeded`, `failed`, or `skipped`, set `finished_at`.
+6. Update `JobRun` status using the mapping below.
 7. Return trace data from `task_get_v1` / trace read tools.
 
-The executor registry should be explicit:
+The trace must be created and saved **before** the final `JobRun`/`Job` status
+update, so an executor crash still leaves a persisted `failed` trace.
+
+**Trace status → run status mapping.** `ActionTrace`/`ActionResult` allow
+`skipped`, but `JobRun` has no `skipped` status. Map as:
+
+| ActionResult.status | JobRun.status | Job.status (non-recurring) |
+| --- | --- | --- |
+| `succeeded` | `succeeded` | `completed` |
+| `skipped` | `succeeded` | `completed` |
+| `failed` | `failed` | `failed` |
+
+`skipped` means the action intentionally did no work (e.g. nothing to send); it
+is a success from the scheduler's point of view, so the run is not failed. The
+distinction is preserved on the trace, not on the run. Recurring jobs schedule
+their next run for both `succeeded` and `skipped`, never for `failed` (unchanged
+from Spec 01).
+
+The executor registry should be explicit, and its keys are the **single source
+of truth** for supported actions — `SUPPORTED_ACTIONS` becomes `EXECUTORS.keys()`
+rather than a second hand-maintained list:
 
 ```python
 EXECUTORS = {
@@ -169,6 +201,10 @@ EXECUTORS = {
     "review_pr": PlaceholderExecutor("review_pr"),
 }
 ```
+
+Every executor — including `PlaceholderExecutor` — must append **at least one**
+ordered `ActionTraceEvent`, so the "every executor writes events" invariant
+holds uniformly. The placeholder writes a single `mock_execute` succeeded event.
 
 Unknown actions should fail before execution, using the existing
 `UNSUPPORTED_ACTION` behavior from Spec 03.
@@ -209,6 +245,27 @@ MCP-facing schema rule:
 - schedule fields stay flat: `type`, `time`, `schedule`, `timezone`
 - action-specific fields go under `action_params`
 - do not put schedule fields inside `action_params`
+
+This matches the current public MCP surface (`app/mcp/server.py`), where
+`task_create_v1` already takes flat schedule fields. Implementation notes:
+
+- `task_create_v1` / `task_modify_v1` gain an optional `action_params: dict`
+  parameter, mapped into the internal request alongside `job_params`.
+- The service stores it as `action_params_json` (text) and returns it as a dict.
+- `_harden_public_tool_schemas()` sets `additionalProperties: false` on every
+  tool and cannot infer a shape for a loose `dict`. `action_params` therefore
+  stays an **open** object at the tool-schema level; per-action required-field
+  checks (e.g. `send_email` needs `to`/`subject`/`body`) live in the service /
+  executor, not in the JSON schema.
+
+**Validation happens twice, on purpose.** `task_create_v1` / `task_modify_v1`
+validate the action's required `action_params` up front and return a structured
+`VALIDATION_ERROR` (fast feedback for the model — see §9). The executor
+**re-validates** the same params at run time and, on failure, records a `failed`
+trace with a `validate_action_params` event (defense in depth — see §9). The
+execute-time failure path is reachable when a job was created before an
+executor's requirements changed, or via an action whose params the create schema
+treats as optional; tests use such a case to exercise the failed-trace path.
 
 Example reminder:
 
@@ -311,11 +368,19 @@ object.
 
 ## 8. New Read Surface
 
-Add one trace read tool:
+Add one trace read tool. Like the other tools it has three coordinated names,
+all routed through the one service function so both surfaces behave identically:
 
-```txt
-task_trace_get_v1
-```
+| Surface | Name |
+| --- | --- |
+| Public MCP tool (`app/mcp/server.py`) | `task_trace_get_v1` |
+| Internal registry key (`app/mcp/registry.py`) | `task.trace.get@v1` |
+| REST route (`app/api/routes.py`) | `GET /v1/traces/{trace_id}` |
+
+**Ownership.** Resolve the trace, then its owning job, then apply the existing
+`_load_owned_job` convention: `NOT_FOUND` when the `trace_id` does not exist,
+`PERMISSION_DENIED` when it exists but belongs to another `user_id`. Do not
+invent a new code.
 
 Arguments:
 
@@ -362,9 +427,12 @@ Expected tool path:
 
 ## 9. Error Behavior
 
-Trace failures should be structured and fixable.
+Trace failures should be structured and fixable. The same missing field shows up
+in two places depending on *when* it is caught (see §6, "Validation happens
+twice").
 
-Example missing email body:
+**Create/modify time** — caught synchronously, no job is created, no trace. The
+tool returns the structured error so the model can fix and retry:
 
 ```json
 {
@@ -378,8 +446,10 @@ Example missing email body:
 }
 ```
 
-If execution fails after the job is already scheduled, the trace should still be
-saved:
+**Execute time** — if a job reaches execution with invalid params anyway (created
+before requirements changed, or params optional in the create schema), the
+executor still runs, fails validation, and saves a `failed` trace. The run is
+marked `failed` per the §5 mapping:
 
 ```json
 {
@@ -420,49 +490,57 @@ Build Spec 04 in this order:
    - `new_trace_event_id()`
 
 2. Add ORM models:
-   - `ActionTrace`
+   - `ActionTrace` (with `artifact_json`, unique `run_id`)
    - `ActionTraceEvent`
    - `Job.action_params_json`
 
 3. Add serializer helpers:
    - `job_action_params(job) -> dict`
-   - `trace_to_dict(trace, events=False)`
+   - `trace_to_dict(trace, events=False)` — parses `*_json` text columns back
+     into dicts so responses are symmetric with what executors wrote
 
 4. Update create/modify schemas and services:
-   - accept optional `action_params`
-   - store as JSON text
-   - return as dict
-   - keep `additionalProperties: false` at the tool schema level where possible
+   - accept optional `action_params` (flat sibling of the schedule fields on the
+     public MCP surface; see §6)
+   - store as JSON text, return as dict
+   - validate required per-action params at create/modify (fast feedback)
+   - `action_params` stays an open object in the tool schema; required-field
+     checks live in service/executor, not JSON schema
 
 5. Add trace repository helpers:
    - `create_trace_for_run(db, run, job)`
    - `append_trace_event(db, trace_id, stage, status, input=None, output=None, error=None)`
-   - `finish_trace(db, trace, status, summary=None, error=None)`
+     (serializes `input`/`output` dicts to text)
+   - `finish_trace(db, trace, status, summary=None, artifact=None, error=None)`
 
-6. Replace placeholder execution:
-   - call executor registry from the worker
-   - pass `ActionContext`
-   - mark trace failed when executor raises
-   - always save trace before updating final run/job status
+6. Replace placeholder execution (`app/jobs/actions.py` + `app/scheduler/worker.py`):
+   - make `SUPPORTED_ACTIONS = EXECUTORS.keys()` — one source of truth, not two
+   - call executor registry from the worker, passing `ActionContext` (it reuses
+     the worker's `db` session — no new `SessionLocal`, so no conftest change)
+   - mark trace `failed` when the executor raises or returns `failed`
+   - apply the §5 trace-status → run/job-status mapping (including `skipped`)
+   - always save the trace before the final run/job status update
 
-7. Add mock executors:
-   - `send_email`: validate params, render email, mock send
+7. Add mock executors (each appends ≥1 ordered event):
+   - `send_email`: validate params, render email, mock send (records artifact)
    - `send_reminder`: validate text, mock remind
-   - placeholder executor for the other allowed actions
+   - `PlaceholderExecutor` for the other allowed actions: one `mock_execute` event
 
-8. Add read surfaces:
-   - API/service function for trace lookup by `trace_id`
-   - MCP tool `task_trace_get_v1`
-   - latest trace summary in `task_get_v1`
+8. Add read surfaces (one service fn, three names — see §8):
+   - service function for trace lookup by `trace_id` with ownership check
+   - registry key `task.trace.get@v1` + public MCP tool `task_trace_get_v1`
+   - REST route `GET /v1/traces/{trace_id}`
+   - latest trace summary embedded per-run in `task_get_v1`
 
 9. Add tests:
-   - create job with `action_params`
-   - modify job `action_params`
-   - worker creates one trace per run
-   - trace events are ordered
-   - `send_email` success records validate/render/mock-send
-   - missing email body fails with trace event and structured error
-   - `task_trace_get_v1` rejects wrong `user_id`
+   - create job with `action_params`; modify job `action_params`
+   - worker creates exactly one trace per run; trace events are ordered
+   - `send_email` success records validate/render/mock-send and an artifact
+   - missing email body at create time → structured `VALIDATION_ERROR` (no job)
+   - invalid params at execute time → `failed` trace + `failed` run
+   - a `skipped` result marks the run `succeeded`, trace `skipped`
+   - `task_trace_get_v1` returns `PERMISSION_DENIED` for a wrong `user_id`,
+     `NOT_FOUND` for an unknown `trace_id`
    - Claude-facing tool list includes `task_trace_get_v1`
 
 ## 12. Example API Eval Boundary
@@ -517,16 +595,20 @@ The eval can then check both layers:
 
 ## 13. Acceptance Criteria
 
-- Every executed `JobRun` creates one `ActionTrace`.
-- Every executor writes ordered `ActionTraceEvent` rows.
+- Every executed `JobRun` creates exactly one `ActionTrace`.
+- Every executor — placeholder included — writes ≥1 ordered `ActionTraceEvent`.
 - `Job` can store and return optional `action_params`.
-- `send_email` has a mock executor that records validate/render/mock-send steps.
+- `send_email` has a mock executor that records validate/render/mock-send steps
+  and stores an artifact.
 - `send_reminder` has a mock executor that records validate/mock-remind steps.
+- A `skipped` result marks the run `succeeded` while the trace stays `skipped`.
 - `task_get_v1` shows trace summary for recent runs.
-- `task_trace_get_v1` returns the full trace and events.
-- Failed execution still creates a trace.
-- Structured errors identify `field` and `expected` whenever action params are
-  missing or invalid.
+- `task_trace_get_v1` returns the full trace and events, and enforces ownership
+  (`NOT_FOUND` unknown id, `PERMISSION_DENIED` wrong user).
+- Failed execution still creates a `failed` trace.
+- Required action params are validated at create/modify and re-validated at
+  execute time; structured errors identify `field` and `expected`.
+- `SUPPORTED_ACTIONS` is derived from the executor registry (single source).
 - No LLM-authored trace is trusted as source of truth.
 - Claude Desktop remains a manual integration test path.
 - API-based evals are deferred to Spec 07.

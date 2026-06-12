@@ -12,6 +12,7 @@ EXPECTED_TOOLS = {
     "task.get@v1",
     "task.modify@v1",
     "task.delete@v1",
+    "task.trace.get@v1",
 }
 
 

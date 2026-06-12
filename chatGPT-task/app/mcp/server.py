@@ -94,6 +94,7 @@ def task_create(
     time: Optional[str] = None,
     schedule: Optional[str] = None,
     timezone: Optional[str] = None,
+    action_params: Optional[dict] = None,
 ) -> dict:
     action = _normalize_action(action)
     return dispatch(
@@ -107,6 +108,7 @@ def task_create(
                 "schedule": schedule,
                 "timezone": timezone,
             },
+            "action_params": action_params,
         },
     )
 
@@ -154,6 +156,7 @@ def task_modify(
     time: Optional[str] = None,
     schedule: Optional[str] = None,
     timezone: Optional[str] = None,
+    action_params: Optional[dict] = None,
 ) -> dict:
     if action is not None:
         action = _normalize_action(action)
@@ -175,6 +178,7 @@ def task_modify(
             "action": action,
             "status": status,
             "job_params": job_params or None,
+            "action_params": action_params,
         },
     )
 
@@ -182,6 +186,20 @@ def task_modify(
 @mcp.tool(name="task_delete_v1", description="Soft-delete an existing job.")
 def task_delete(user_id: str, job_id: str) -> dict:
     return dispatch("task.delete@v1", {"user_id": user_id, "job_id": job_id})
+
+
+@mcp.tool(
+    name="task_trace_get_v1",
+    description=(
+        "Get the scheduler's execution trace for a fired run, including ordered "
+        "events. Use after task_get_v1 surfaces a run's trace_id to explain what "
+        "actually happened. Summarize the returned trace; do not invent steps."
+    ),
+)
+def task_trace_get(user_id: str, trace_id: str) -> dict:
+    return dispatch(
+        "task.trace.get@v1", {"user_id": user_id, "trace_id": trace_id}
+    )
 
 
 def _harden_public_tool_schemas() -> None:
