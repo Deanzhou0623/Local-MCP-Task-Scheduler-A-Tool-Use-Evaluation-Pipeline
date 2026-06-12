@@ -12,6 +12,7 @@ EXPECTED_TOOLS = {
     "task.get@v1",
     "task.modify@v1",
     "task.delete@v1",
+    "task.trace.get@v1",
 }
 
 
@@ -56,6 +57,8 @@ def test_dispatch_unsupported_action_envelope(isolated_db):
     )
     assert res["ok"] is False
     assert res["error"]["code"] == "UNSUPPORTED_ACTION"
+    assert res["error"]["field"] == "action"
+    assert "send_reminder" in res["error"]["expected"]
 
 
 def test_dispatch_create_recurring_with_explicit_timezone(isolated_db):

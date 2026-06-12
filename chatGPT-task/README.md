@@ -7,8 +7,8 @@ the four core flows are **create**, **view**, **modify**, and **delete** a job.
 
 ## What it does
 
-- Exposes MCP tools (`task.create@v1`, `task.list@v1`, `task.get@v1`,
-  `task.modify@v1`, `task.delete@v1`) that route through a dictionary registry.
+- Exposes MCP tools (`task_create_v1`, `task_list_v1`, `task_get_v1`,
+  `task_modify_v1`, `task_delete_v1`) that route through a dictionary registry.
 - Mirrors those tools as a REST API under `/v1/jobs` (FastAPI + Pydantic).
 - Supports **immediate**, **one_time**, and **recurring** (cron) jobs with IANA
   timezones.
@@ -76,11 +76,11 @@ npx @modelcontextprotocol/inspector python -m app.mcp.server
 
 | Tool | API endpoint | Purpose |
 | --- | --- | --- |
-| `task.create@v1` | `POST /v1/jobs` | Create a job and its first run |
-| `task.list@v1` | `GET /v1/jobs` | List a user's jobs |
-| `task.get@v1` | `GET /v1/jobs/{job_id}` | View one job and recent runs |
-| `task.modify@v1` | `PATCH /v1/jobs/{job_id}` | Modify a job, recompute runs |
-| `task.delete@v1` | `DELETE /v1/jobs/{job_id}` | Soft-delete a job |
+| `task_create_v1` | `POST /v1/jobs` | Create a job and its first run |
+| `task_list_v1` | `GET /v1/jobs` | List a user's jobs |
+| `task_get_v1` | `GET /v1/jobs/{job_id}` | View one job and recent runs |
+| `task_modify_v1` | `PATCH /v1/jobs/{job_id}` | Modify a job, recompute runs |
+| `task_delete_v1` | `DELETE /v1/jobs/{job_id}` | Soft-delete a job |
 
 Every request requires `user_id` to enforce the ownership boundary. Example
 create arguments:
@@ -93,7 +93,7 @@ create arguments:
 }
 ```
 
-If a `one_time` or `recurring` job omits `job_params.timezone`, `task.create@v1`
+If a `one_time` or `recurring` job omits `job_params.timezone`, `task_create_v1`
 returns a structured validation error. The scheduler does not infer a timezone;
 the LLM or eval harness must provide an explicit IANA timezone. Immediate jobs
 may omit timezone.

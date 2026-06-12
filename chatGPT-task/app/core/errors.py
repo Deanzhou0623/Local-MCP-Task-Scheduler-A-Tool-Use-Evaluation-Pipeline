@@ -11,6 +11,8 @@ identical error shapes.
 
 from __future__ import annotations
 
+from typing import Any
+
 # Required error codes (spec 01, section 10).
 VALIDATION_ERROR = "VALIDATION_ERROR"
 NOT_FOUND = "NOT_FOUND"
@@ -35,7 +37,7 @@ def error_envelope(
     message: str,
     *,
     field: str | None = None,
-    expected: str | None = None,
+    expected: Any | None = None,
 ) -> dict:
     """Build the canonical error envelope, omitting empty optional keys."""
     error: dict = {"code": code, "message": message}
@@ -59,7 +61,7 @@ class AppError(Exception):
         message: str,
         *,
         field: str | None = None,
-        expected: str | None = None,
+        expected: Any | None = None,
     ) -> None:
         super().__init__(message)
         self.code = code

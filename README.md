@@ -2,10 +2,10 @@
 
 A local real MCP task scheduler used as a controlled environment for studying LLM tool use. The project starts with a working MCP server that can create, list, inspect, cancel, and execute scheduled jobs, then grows toward production scheduling and evals.
 
-This project has two goals:
+This project has three goals:
 
 1. Build a working real MCP scheduler that can be tested with MCP Inspector and Claude Desktop.
-2. Add production scheduler concepts from the design notes, including job run history, recurring jobs, durable execution, and external API actions.
+2. Add production scheduler concepts from the design notes, including job run history, recurring jobs, durable execution, and traceable action execution.
 3. Use the scheduler as the environment for a first LLM tool-use evals pipeline.
 
 Example user request:
@@ -30,7 +30,7 @@ Future recurring-job tool call shape:
 
 ## Status
 
-This repository is currently in the project-planning / MVP-build stage. The current implementation direction is real MCP first: build a local MCP scheduler, verify it with MCP Inspector and Claude Desktop, then add external API integrations, production hardening, and the evals pipeline.
+This repository is currently in the project-planning / MVP-build stage. The current implementation direction is real MCP first: build a local MCP scheduler, verify it with MCP Inspector and Claude Desktop, then tighten tool reliability, add traceable action execution, build evals, and later add production hardening.
 
 ## MVP Scope
 
@@ -47,7 +47,7 @@ The first real MCP version should support:
 - MCP Inspector validation
 - Claude Desktop testing
 
-Deferred until later features:
+Deferred until later specs:
 
 - FastAPI / REST API
 - Recurring jobs
@@ -55,7 +55,7 @@ Deferred until later features:
 - Timezone-heavy scheduling
 - Separate `JobRun` history table
 - Retry policy, DLQ, heartbeat, and durable queues
-- External API actions
+- Traceable action execution
 - PostgreSQL persistence
 - Hosted deployment
 - Evals pipeline
@@ -89,25 +89,23 @@ Job status and result
 The first MCP server exposes these tools:
 
 ```txt
-task.create@v1
-task.list@v1
-task.get@v1
-task.modify@v1
-task.delete@v1
+task_create_v1
+task_list_v1
+task_get_v1
+task_modify_v1
+task_delete_v1
 ```
 
 The LLM or eval harness must provide strict scheduler arguments. For local-time
-schedules, resolve relative time and timezone before calling `task.create@v1`:
+schedules, resolve relative time and timezone before calling `task_create_v1`:
 
 ```json
 {
   "user_id": "user_123",
   "action": "summarize_financial_news",
-  "job_params": {
-    "type": "recurring",
-    "schedule": "0 8 * * *",
-    "timezone": "America/Vancouver"
-  }
+  "type": "recurring",
+  "schedule": "0 8 * * *",
+  "timezone": "America/Vancouver"
 }
 ```
 
@@ -120,13 +118,12 @@ Each tool should include:
 - Enum values
 - Structured validation errors
 
-Example `task.create@v1` schema:
+Example `task_create_v1` schema:
 
 ```json
 {
   "type": "object",
-  "additionalProperties": false,
-  "required": ["user_id", "action", "job_params"],
+  "required": ["user_id", "action", "type"],
   "properties": {
     "user_id": {
       "type": "string",
@@ -134,19 +131,12 @@ Example `task.create@v1` schema:
     },
     "action": {
       "type": "string",
-      "description": "Supported action name."
+      "description": "Supported action name, such as send_reminder or generate_report."
     },
-    "job_params": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["type"],
-      "properties": {
-        "type": { "enum": ["immediate", "one_time", "recurring"] },
-        "time": { "type": "string", "format": "date-time" },
-        "schedule": { "type": "string" },
-        "timezone": { "type": "string", "description": "IANA timezone." }
-      }
-    }
+    "type": { "type": "string", "description": "immediate, one_time, or recurring" },
+    "time": { "type": "string", "format": "date-time" },
+    "schedule": { "type": "string" },
+    "timezone": { "type": "string", "description": "IANA timezone." }
   }
 }
 ```
@@ -266,13 +256,13 @@ chatGPT-task/
 |-- docs/
 |   |-- Q&A.md
 |   |-- spec01_real_mcp_scheduler_core.md
-|   |-- feature02_mcp_inspector_and_claude_desktop_testing.md
-|   |-- feature03_tool_schema_and_error_contract.md
-|   |-- feature04_integrate_external_apis.md
-|   |-- feature05_job_execution_production_hardening.md
-|   |-- feature06_job_run_history_and_recurring_jobs.md
-|   |-- feature07_llm_tool_use_evals_pipeline.md
-|   `-- feature08_results_analysis_and_iteration.md
+|   |-- spec02_mcp_inspector_and_claude_desktop_testing.md
+|   |-- spec03_tool_schema_and_error_contract.md
+|   |-- spec04_traceable_action_execution.md
+|   |-- spec05_job_execution_production_hardening.md
+|   |-- spec06_job_run_history_and_recurring_jobs.md
+|   |-- spec07_llm_tool_use_evals_pipeline.md
+|   `-- spec08_results_analysis_and_iteration.md
 |-- chatGPT-task/
 |   |-- app/
 |   |   |-- api/
@@ -315,7 +305,7 @@ pytest
 
 The first MCP scaffold does not require provider API keys.
 
-Later external API and eval features may need:
+Later LLM, eval, and external integration specs may need:
 
 ```txt
 OPENAI_API_KEY=
@@ -336,13 +326,13 @@ The first real MCP MVP is complete when:
 - `python -m app.mcp.server` starts a real MCP server.
 - MCP Inspector can connect to the server.
 - Claude Desktop can load the local MCP server as a testing client.
-- `task.create@v1` creates a SQLite job.
+- `task_create_v1` creates a SQLite job.
 - The watcher finds due jobs.
 - The worker executes queued jobs and marks them completed.
-- `task.list@v1` returns scheduled jobs.
-- `task.get@v1` returns one job status.
-- `task.modify@v1` modifies a scheduled job.
-- `task.delete@v1` deletes a non-terminal job.
+- `task_list_v1` returns scheduled jobs.
+- `task_get_v1` returns one job status.
+- `task_modify_v1` modifies a scheduled job.
+- `task_delete_v1` deletes a non-terminal job.
 - Tool schemas and structured errors are documented.
 
 ## Roadmap
@@ -354,25 +344,25 @@ Questions and design-review notes are recorded in [Q&A.md](docs/Q&A.md).
 1. [Spec 01: Real MCP Scheduler Core](docs/spec01_real_mcp_scheduler_core.md)
    Build the local MCP server, SQLite job store, watcher, in-memory queue, worker, and create/view/modify/delete task tools.
 
-2. [Feature 02: MCP Inspector And Claude Desktop Testing](docs/feature02_mcp_inspector_and_claude_desktop_testing.md)
+2. [Spec 02: MCP Inspector And Claude Desktop Testing](docs/spec02_mcp_inspector_and_claude_desktop_testing.md)
    Verify the MCP server with MCP Inspector first, then connect Claude Desktop as the first natural-language testing client.
 
-3. [Feature 03: Tool Schema And Error Contract](docs/feature03_tool_schema_and_error_contract.md)
+3. [Spec 03: Tool Schema And Error Contract](docs/spec03_tool_schema_and_error_contract.md)
    Tighten tool names, descriptions, JSON schemas, validation behavior, and structured errors.
 
-4. [Feature 04: Integrate External APIs](docs/feature04_integrate_external_apis.md)
-   Add real task actions that call external APIs, replacing placeholder execution behavior.
+4. [Spec 04: Traceable Action Execution](docs/spec04_traceable_action_execution.md)
+   Add an action executor interface and execution traces, starting with simple/mock actions so scheduler behavior remains inspectable.
 
-5. [Feature 05: Job Execution Production Hardening](docs/feature05_job_execution_production_hardening.md)
+5. [Spec 05: Job Execution Production Hardening](docs/spec05_job_execution_production_hardening.md)
    Move from prototype watcher/worker behavior toward durable execution guarantees.
 
-6. [Feature 06: Job Run History And Recurring Jobs](docs/feature06_job_run_history_and_recurring_jobs.md)
+6. [Spec 06: Job Run History And Recurring Jobs](docs/spec06_job_run_history_and_recurring_jobs.md)
    Add JobRun history, recurring schedules, cron parsing, and timezone handling.
 
-7. [Feature 07: LLM Tool Use Evals Pipeline](docs/feature07_llm_tool_use_evals_pipeline.md)
+7. [Spec 07: LLM Tool Use Evals Pipeline](docs/spec07_llm_tool_use_evals_pipeline.md)
    Build the dataset, model runner, trace logger, grader, and CSV output for tool-use evals.
 
-8. [Feature 08: Results Analysis And Iteration](docs/feature08_results_analysis_and_iteration.md)
+8. [Spec 08: Results Analysis And Iteration](docs/spec08_results_analysis_and_iteration.md)
    Analyze failures, compare models, improve prompts/schemas, and rerun evals.
 
 ## References

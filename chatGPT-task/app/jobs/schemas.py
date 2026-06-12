@@ -15,7 +15,7 @@ Two flavors of each mutating request exist:
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Literal, Optional
+from typing import Any, Literal, Optional
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -39,6 +39,9 @@ class CreateJobRequest(_Strict):
     user_id: str
     action: str
     job_params: JobParamsCreate
+    # Action-specific params ("what should this action do?"). Open object: the
+    # required keys per action are enforced in the service / executor (spec 04).
+    action_params: Optional[dict[str, Any]] = None
 
 
 # --- List -----------------------------------------------------------------
@@ -72,12 +75,20 @@ class ModifyJobRequest(_Strict):
     action: Optional[str] = None
     status: Optional[EditableStatus] = None
     job_params: Optional[JobParamsModify] = None
+    # Replace the job's action params before the run fires (spec 04, section 6).
+    action_params: Optional[dict[str, Any]] = None
 
 
 class ModifyJobToolArgs(ModifyJobRequest):
     """MCP tool args — ``job_id`` is part of the argument object."""
 
     job_id: str
+
+
+# --- Trace get (spec 04) --------------------------------------------------
+class TraceGetToolArgs(_Strict):
+    user_id: str
+    trace_id: str
 
 
 # --- Delete ---------------------------------------------------------------

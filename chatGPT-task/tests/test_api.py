@@ -121,3 +121,68 @@ def test_get_missing_job_returns_404(client):
     r = client.get("/v1/jobs/job_nope", params={"user_id": USER})
     assert r.status_code == 404
     assert r.json()["error"]["code"] == "NOT_FOUND"
+
+
+# --- Trace read surface (spec 04) -----------------------------------------
+def test_get_trace_over_rest(client, isolated_db):
+    """Create a job over REST, run it, then read its trace over REST."""
+    from app.jobs.models import ActionTrace
+    from app.scheduler import process_run
+
+    created = client.post(
+        "/v1/jobs",
+        json={
+            "user_id": USER,
+            "action": "send_reminder",
+            "job_params": {"type": "immediate"},
+            "action_params": {"text": "Stand up and stretch."},
+        },
+    ).json()
+    run_id = created["next_run"]["run_id"]
+
+    session = isolated_db()
+    try:
+        process_run(session, run_id)
+        trace_id = (
+            session.query(ActionTrace).filter_by(run_id=run_id).one().trace_id
+        )
+    finally:
+        session.close()
+
+    r = client.get(f"/v1/traces/{trace_id}", params={"user_id": USER})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["ok"] is True
+    assert body["trace"]["status"] == "succeeded"
+    assert [e["stage"] for e in body["trace"]["events"]] == [
+        "validate_action_params",
+        "mock_remind",
+    ]
+
+
+def test_get_trace_wrong_user_returns_403(client, isolated_db):
+    from app.jobs.models import ActionTrace
+    from app.scheduler import process_run
+
+    created = client.post(
+        "/v1/jobs",
+        json={
+            "user_id": USER,
+            "action": "generate_report",
+            "job_params": {"type": "immediate"},
+        },
+    ).json()
+    run_id = created["next_run"]["run_id"]
+
+    session = isolated_db()
+    try:
+        process_run(session, run_id)
+        trace_id = (
+            session.query(ActionTrace).filter_by(run_id=run_id).one().trace_id
+        )
+    finally:
+        session.close()
+
+    r = client.get(f"/v1/traces/{trace_id}", params={"user_id": "intruder"})
+    assert r.status_code == 403
+    assert r.json()["error"]["code"] == "PERMISSION_DENIED"

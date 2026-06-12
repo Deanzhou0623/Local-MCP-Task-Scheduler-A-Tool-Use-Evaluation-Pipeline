@@ -51,6 +51,19 @@ RUN_CANCELLED = "cancelled"
 # Runs the watcher/delete logic may still cancel (not yet started executing).
 RUN_CANCELLABLE = {RUN_PENDING, RUN_QUEUED}
 
+# --- Action trace statuses (spec 04) ---------------------------------------
+TRACE_PENDING = "pending"
+TRACE_RUNNING = "running"
+TRACE_SUCCEEDED = "succeeded"
+TRACE_FAILED = "failed"
+TRACE_SKIPPED = "skipped"
+
+# Per-event statuses on the append-only step log.
+EVENT_STARTED = "started"
+EVENT_SUCCEEDED = "succeeded"
+EVENT_FAILED = "failed"
+EVENT_SKIPPED = "skipped"
+
 
 class Job(Base):
     __tablename__ = "jobs"
@@ -64,6 +77,8 @@ class Job(Base):
     # Cron expression for recurring jobs; null otherwise.
     schedule: Mapped[str | None] = mapped_column(String(128), nullable=True)
     timezone: Mapped[str] = mapped_column(String(64), default="UTC")
+    # Action-specific params ("what should this action do?"), JSON text (spec 04).
+    action_params_json: Mapped[str | None] = mapped_column(Text, nullable=True)
     status: Mapped[str] = mapped_column(String(16), default=JOB_SCHEDULED)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow_naive)
     updated_at: Mapped[datetime] = mapped_column(
@@ -120,3 +135,71 @@ class JobRun(Base):
 
     def __repr__(self) -> str:  # pragma: no cover - debugging aid
         return f"<JobRun {self.run_id} job={self.job_id} status={self.status!r}>"
+
+
+class ActionTrace(Base):
+    """One execution trace per ``JobRun`` (spec 04, section 4).
+
+    The scheduler — not the LLM — owns this record. It is created when a run
+    starts executing and finalized to ``succeeded``/``failed``/``skipped`` so
+    evals have ground truth about what actually happened.
+    """
+
+    __tablename__ = "action_traces"
+
+    trace_id: Mapped[str] = mapped_column(String(48), primary_key=True)
+    # One trace per run for spec 04 (no retries yet); unique guards that.
+    run_id: Mapped[str] = mapped_column(
+        String(40), ForeignKey("job_runs.run_id"), unique=True, index=True
+    )
+    job_id: Mapped[str] = mapped_column(String(40), index=True)
+    user_id: Mapped[str] = mapped_column(String(64))
+    action: Mapped[str] = mapped_column(String(128))
+    status: Mapped[str] = mapped_column(String(16), default=TRACE_PENDING)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    summary: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Serialized ActionResult.artifact (JSON text); exposed as a dict.
+    artifact_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow_naive)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, default=utcnow_naive, onupdate=utcnow_naive
+    )
+
+    events: Mapped[list["ActionTraceEvent"]] = relationship(
+        back_populates="trace",
+        cascade="all, delete-orphan",
+        order_by="ActionTraceEvent.sequence",
+    )
+
+    def __repr__(self) -> str:  # pragma: no cover - debugging aid
+        return f"<ActionTrace {self.trace_id} status={self.status!r}>"
+
+
+class ActionTraceEvent(Base):
+    """Append-only, ordered step log for a trace (spec 04, section 4)."""
+
+    __tablename__ = "action_trace_events"
+
+    event_id: Mapped[str] = mapped_column(String(48), primary_key=True)
+    trace_id: Mapped[str] = mapped_column(
+        String(48), ForeignKey("action_traces.trace_id"), index=True
+    )
+    sequence: Mapped[int] = mapped_column(Integer)
+    stage: Mapped[str] = mapped_column(String(64))
+    status: Mapped[str] = mapped_column(String(16))
+    input_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    output_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow_naive)
+
+    trace: Mapped["ActionTrace"] = relationship(back_populates="events")
+
+    __table_args__ = (
+        # Read a trace's events in order.
+        Index("idx_trace_events_trace_seq", "trace_id", "sequence"),
+    )
+
+    def __repr__(self) -> str:  # pragma: no cover - debugging aid
+        return f"<ActionTraceEvent {self.stage} seq={self.sequence}>"

@@ -33,11 +33,13 @@ from app.jobs.schemas import (
     ListJobsParams,
     ModifyJobRequest,
     ModifyJobToolArgs,
+    TraceGetToolArgs,
 )
 from app.jobs.service import (
     create_job,
     delete_job,
     get_job,
+    get_trace,
     list_jobs,
     modify_job,
 )
@@ -48,7 +50,13 @@ def _validation_envelope(exc: ValidationError) -> dict:
     first = exc.errors()[0]
     loc = [str(p) for p in first.get("loc", ()) if p not in ("body",)]
     field = ".".join(loc) or None
-    return error_envelope(VALIDATION_ERROR, first.get("msg", "Invalid input."), field=field)
+    expected = first.get("ctx", {}).get("expected")
+    return error_envelope(
+        VALIDATION_ERROR,
+        first.get("msg", "Invalid input."),
+        field=field,
+        expected=expected,
+    )
 
 
 def _parse(model: type[BaseModel], args: dict | None):
@@ -122,6 +130,15 @@ def delete_task(args: dict) -> dict:
     )
 
 
+def get_trace_task(args: dict) -> dict:
+    parsed = _parse(TraceGetToolArgs, args)
+    if isinstance(parsed, dict):
+        return parsed
+    return _execute(
+        lambda db: get_trace(db, trace_id=parsed.trace_id, user_id=parsed.user_id)
+    )
+
+
 # ---------------------------------------------------------------------------
 # Registry + dispatch
 # ---------------------------------------------------------------------------
@@ -131,6 +148,7 @@ TOOL_REGISTRY: dict[str, Callable[[dict], dict]] = {
     "task.get@v1": get_task,
     "task.modify@v1": modify_task,
     "task.delete@v1": delete_task,
+    "task.trace.get@v1": get_trace_task,
 }
 
 

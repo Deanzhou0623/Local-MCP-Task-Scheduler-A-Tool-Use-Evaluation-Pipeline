@@ -47,7 +47,7 @@ Not included in Spec 01:
 - Durable production queue.
 - Retry policy, heartbeat, DLQ, or crash recovery.
 
-Those belong to later features.
+Those belong to later specs.
 
 ## 3. Design Rules
 
@@ -384,8 +384,8 @@ scheduler call is:
 ```
 
 Spec 01 does not fetch finance news at scheduling time. At execution time the
-worker only runs a placeholder action. Real news search, summarization, and
-delivery are Feature 04 or later.
+worker only runs a placeholder action. Real search, summarization, and delivery
+are Spec 04 or later.
 
 ## 15. Tests
 
