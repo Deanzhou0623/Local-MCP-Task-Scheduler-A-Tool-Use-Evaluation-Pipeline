@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta
 
-from app.core.timeutils import time_bucket
+from app.core.timeutils import bucket_hour, bucket_shard, time_bucket
 from app.jobs.models import (
     JOB_COMPLETED,
     JOB_SCHEDULED,
@@ -22,6 +22,7 @@ USER = "user_123"
 
 
 def _make_run(db, scheduled_at, status=RUN_PENDING):
+    run_id = f"run_{scheduled_at.isoformat()}_{status}"
     job = Job(
         job_id=f"job_{scheduled_at.isoformat()}",
         user_id=USER,
@@ -33,11 +34,13 @@ def _make_run(db, scheduled_at, status=RUN_PENDING):
     )
     db.add(job)
     run = JobRun(
-        run_id=f"run_{scheduled_at.isoformat()}_{status}",
+        run_id=run_id,
         job_id=job.job_id,
         user_id=USER,
         scheduled_at=scheduled_at,
-        scheduled_bucket=time_bucket(scheduled_at),
+        scheduled_bucket_hour=bucket_hour(scheduled_at),
+        scheduled_bucket_shard=bucket_shard(run_id),
+        scheduled_bucket=time_bucket(scheduled_at, run_id),
         status=status,
     )
     db.add(run)
@@ -48,8 +51,8 @@ def _make_run(db, scheduled_at, status=RUN_PENDING):
 def test_hot_buckets_includes_lookback():
     now = datetime(2026, 6, 10, 8, 5)
     buckets = hot_buckets(now)
-    assert "2026-06-10T08" in buckets
-    assert "2026-06-10T07" in buckets
+    assert "2026061008" in buckets
+    assert "2026061007" in buckets
 
 
 def test_find_due_runs_returns_due_pending_in_bucket(db):

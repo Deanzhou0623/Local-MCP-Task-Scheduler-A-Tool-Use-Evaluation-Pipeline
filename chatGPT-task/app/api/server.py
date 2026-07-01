@@ -15,14 +15,14 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
 from app.api.routes import router, scheduler_router, trace_router
-from app.core.database import Base, engine
+from app.core.database import init_database
 from app.core.errors import VALIDATION_ERROR, AppError, error_envelope
 from app.jobs import models  # noqa: F401 - ensure tables are registered
 
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
-    Base.metadata.create_all(bind=engine)
+    init_database()
     yield
 
 

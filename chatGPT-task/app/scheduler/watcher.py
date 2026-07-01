@@ -1,8 +1,8 @@
 """Watcher: find due runs by time bucket and enqueue them (spec 01, §12-13).
 
-The watcher never issues a broad ``WHERE scheduled_at <= now`` scan. It looks
-only at the current hourly ``scheduled_bucket`` plus a short lookback window, so
-each poll stays bounded by due-time locality instead of total table size.
+The normal path looks only at the current hourly bucket plus a short lookback
+window. A bounded cold-bucket sweep catches pending runs left behind while the
+scheduler was down.
 """
 
 from __future__ import annotations
@@ -14,7 +14,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.core.database import SessionLocal
-from app.core.timeutils import time_bucket, utcnow_naive
+from app.core.timeutils import bucket_hour, utcnow_naive
 from app.jobs.models import RUN_PENDING, RUN_QUEUED, JobRun
 from app.scheduler.queue import (
     enqueue_run_once,
@@ -28,23 +28,29 @@ from app.scheduler.worker import recover_stale_running_runs
 # boundary is not missed.
 BUCKET_LOOKBACK_HOURS = 1
 WATCH_BATCH_SIZE = 100
+OVERDUE_SWEEP_BATCH_SIZE = 100
 RECOVERY_INTERVAL_SECONDS = 60
 
 
-def hot_buckets(now_utc: datetime) -> list[str]:
-    """Current bucket plus a short lookback window."""
+def hot_bucket_hours(now_utc: datetime) -> list[str]:
+    """Current bucket hour plus a short lookback window."""
     return [
-        time_bucket(now_utc - timedelta(hours=h))
+        bucket_hour(now_utc - timedelta(hours=h))
         for h in range(BUCKET_LOOKBACK_HOURS + 1)
     ]
 
 
+def hot_buckets(now_utc: datetime) -> list[str]:
+    """Compatibility alias for tests/callers expecting hot bucket strings."""
+    return hot_bucket_hours(now_utc)
+
+
 def find_due_runs(now_utc: datetime, db: Session) -> list[JobRun]:
-    """Pending runs in the hot buckets whose scheduled time has arrived."""
+    """Pending runs in hot bucket hours whose scheduled time has arrived."""
     stmt = (
         select(JobRun)
         .where(
-            JobRun.scheduled_bucket.in_(hot_buckets(now_utc)),
+            JobRun.scheduled_bucket_hour.in_(hot_bucket_hours(now_utc)),
             JobRun.status == RUN_PENDING,
             JobRun.scheduled_at <= now_utc,
         )
@@ -54,9 +60,48 @@ def find_due_runs(now_utc: datetime, db: Session) -> list[JobRun]:
     return list(db.execute(stmt).scalars().all())
 
 
+def find_due_runs_for_shard(
+    now_utc: datetime, db: Session, *, bucket_dt: datetime, shard: int
+) -> list[JobRun]:
+    """Pending due runs for one sharded bucket (under-load fallback)."""
+    bucket = f"{bucket_hour(bucket_dt)}#S{shard:03d}"
+    stmt = (
+        select(JobRun)
+        .where(
+            JobRun.scheduled_bucket == bucket,
+            JobRun.status == RUN_PENDING,
+            JobRun.scheduled_at <= now_utc,
+        )
+        .order_by(JobRun.scheduled_at.asc())
+        .limit(WATCH_BATCH_SIZE)
+    )
+    return list(db.execute(stmt).scalars().all())
+
+
+def find_overdue_pending_runs(now_utc: datetime, db: Session) -> list[JobRun]:
+    """Bounded catch-up scan for pending runs outside the hot bucket window."""
+    hot = set(hot_bucket_hours(now_utc))
+    stmt = (
+        select(JobRun)
+        .where(
+            JobRun.status == RUN_PENDING,
+            JobRun.scheduled_at <= now_utc,
+            ~JobRun.scheduled_bucket_hour.in_(hot),
+        )
+        .order_by(JobRun.scheduled_at.asc())
+        .limit(OVERDUE_SWEEP_BATCH_SIZE)
+    )
+    return list(db.execute(stmt).scalars().all())
+
+
 def enqueue_due_runs(db: Session, now_utc: datetime | None = None) -> list[str]:
-    """Persist queue rows for due runs and return enqueued run ids."""
-    due = find_due_runs(now_utc or utcnow_naive(), db)
+    """Persist durable queue rows for due runs and return enqueued run ids.
+
+    Combines the hot-hour scan with the cold-bucket catch-up sweep (spec 06),
+    then enqueues each run durably (spec 05).
+    """
+    now_utc = now_utc or utcnow_naive()
+    due = find_due_runs(now_utc, db) + find_overdue_pending_runs(now_utc, db)
     ids: list[str] = []
     for run in due:
         enqueue_run_once(db, run, priority=run.priority)
@@ -67,7 +112,7 @@ def enqueue_due_runs(db: Session, now_utc: datetime | None = None) -> list[str]:
 
 
 def recovery_tick(db: Session, now_utc: datetime | None = None) -> dict[str, int]:
-    """Run synchronous recovery helpers for stuck queue/run states."""
+    """Run synchronous recovery helpers for stuck queue/run states (spec 05)."""
     now_utc = now_utc or utcnow_naive()
     result = {
         "expired_leases": recover_expired_leases(db, now=now_utc),
@@ -83,6 +128,7 @@ def watcher_loop(interval: int = 10) -> None:
     last_recovery_at: datetime | None = None
     while True:
         now = utcnow_naive()
+        ids: list[str] = []
         db = SessionLocal()
         try:
             if (

@@ -91,6 +91,15 @@ class TraceGetToolArgs(_Strict):
     trace_id: str
 
 
+# --- Run history (spec 06) ------------------------------------------------
+class ListRunsParams(_Strict):
+    user_id: str
+    job_id: str
+    status: Optional[str] = None
+    page_size: int = Field(default=20, ge=1, le=100)
+    page: int = Field(default=1, ge=1)
+
+
 # --- Delete ---------------------------------------------------------------
 class DeleteJobRequest(_Strict):
     """DELETE body — ``job_id`` comes from the path."""

@@ -18,6 +18,7 @@ from app.jobs.schemas import (
     CreateJobRequest,
     DeleteJobRequest,
     ListJobsParams,
+    ListRunsParams,
     ModifyJobRequest,
 )
 from app.jobs.service import (
@@ -25,6 +26,7 @@ from app.jobs.service import (
     delete_job,
     get_job,
     get_trace,
+    list_runs,
     list_jobs,
     modify_job,
 )
@@ -84,6 +86,27 @@ def detail(
     db: Session = Depends(get_session),
 ) -> dict:
     return get_job(db, job_id=job_id, user_id=user_id)
+
+
+@router.get("/{job_id}/runs")
+def runs(
+    job_id: str,
+    user_id: str = Query(...),
+    status: Optional[str] = Query(None),
+    page_size: int = Query(20, ge=1, le=100),
+    page: int = Query(1, ge=1),
+    db: Session = Depends(get_session),
+) -> dict:
+    return list_runs(
+        db,
+        ListRunsParams(
+            user_id=user_id,
+            job_id=job_id,
+            status=status,
+            page_size=page_size,
+            page=page,
+        ),
+    )
 
 
 @router.patch("/{job_id}")

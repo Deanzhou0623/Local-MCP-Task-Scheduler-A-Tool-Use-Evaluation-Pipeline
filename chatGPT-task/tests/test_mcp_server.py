@@ -29,6 +29,7 @@ EXPECTED_TOOLS = [
     "task_get_v1",
     "task_list_v1",
     "task_modify_v1",
+    "task_runs_list_v1",
     "task_trace_get_v1",
 ]
 

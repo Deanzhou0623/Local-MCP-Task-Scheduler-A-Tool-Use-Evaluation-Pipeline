@@ -65,7 +65,10 @@ def test_validate_timezone_rejects_garbage():
 def test_time_bucket_format():
     from datetime import datetime
 
-    assert time_bucket(datetime(2026, 6, 10, 8, 30)) == "2026-06-10T08"
+    assert time_bucket(datetime(2026, 6, 10, 8, 30)) == "2026061008"
+    assert time_bucket(datetime(2026, 6, 10, 8, 30), "run_abc").startswith(
+        "2026061008#S"
+    )
 
 
 def test_next_recurring_run_respects_timezone():
@@ -77,3 +80,25 @@ def test_next_recurring_run_respects_timezone():
         "0 8 * * *", "America/Vancouver", datetime(2026, 6, 9, 10, 0)
     )
     assert nxt == datetime(2026, 6, 9, 15, 0)
+
+
+def test_next_recurring_run_crosses_spring_dst_boundary():
+    from datetime import datetime
+
+    # After 08:00 PST on Mar 7, the next 08:00 Vancouver fire is Mar 8 after
+    # the switch to PDT, so UTC moves from 16:00 to 15:00.
+    nxt = next_recurring_run_utc(
+        "0 8 * * *", "America/Vancouver", datetime(2026, 3, 7, 17, 0)
+    )
+    assert nxt == datetime(2026, 3, 8, 15, 0)
+
+
+def test_next_recurring_run_crosses_fall_dst_boundary():
+    from datetime import datetime
+
+    # After 08:00 PDT on Oct 31, the next 08:00 Los Angeles fire is Nov 1 after
+    # the switch to PST, so UTC moves from 15:00 to 16:00.
+    nxt = next_recurring_run_utc(
+        "0 8 * * *", "America/Los_Angeles", datetime(2026, 10, 31, 16, 0)
+    )
+    assert nxt == datetime(2026, 11, 1, 16, 0)

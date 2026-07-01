@@ -22,7 +22,7 @@ from dotenv import load_dotenv
 from mcp.server.fastmcp import FastMCP
 from pydantic import Field
 
-from app.core.database import Base, engine
+from app.core.database import init_database
 from app.jobs import models  # noqa: F401 - register tables
 from app.mcp.registry import dispatch
 from app.scheduler import start_scheduler
@@ -141,6 +141,29 @@ def task_get(user_id: str, job_id: str) -> dict:
 
 
 @mcp.tool(
+    name="task_runs_list_v1",
+    description="List paginated run history for one job, including trace summaries.",
+)
+def task_runs_list(
+    user_id: str,
+    job_id: str,
+    status: Optional[str] = None,
+    page_size: int = 20,
+    page: int = 1,
+) -> dict:
+    return dispatch(
+        "task.runs.list@v1",
+        {
+            "user_id": user_id,
+            "job_id": job_id,
+            "status": status,
+            "page_size": page_size,
+            "page": page,
+        },
+    )
+
+
+@mcp.tool(
     name="task_modify_v1",
     description=(
         "Modify an existing job. Use type/time/schedule/timezone fields directly; "
@@ -234,7 +257,7 @@ _harden_public_tool_schemas()
 
 
 def _startup() -> None:
-    Base.metadata.create_all(bind=engine)
+    init_database()
     start_scheduler()
     print("task-scheduler MCP server starting", file=sys.stderr)
 
