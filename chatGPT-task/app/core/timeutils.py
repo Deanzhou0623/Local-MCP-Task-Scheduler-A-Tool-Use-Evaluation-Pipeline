@@ -14,6 +14,7 @@ each poll stays bounded by due-time locality instead of total table size.
 
 from __future__ import annotations
 
+import hashlib
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 
@@ -23,6 +24,7 @@ from app.core.clock import now_utc
 from app.core.errors import VALIDATION_ERROR, AppError
 
 UTC = timezone.utc
+DEFAULT_BUCKET_SHARDS = 64
 
 
 def utcnow_naive() -> datetime:
@@ -34,9 +36,36 @@ def utcnow_naive() -> datetime:
     return now_utc()
 
 
-def time_bucket(dt_utc_naive: datetime) -> str:
-    """Hourly UTC bucket, e.g. ``2026-06-10T08`` (spec 01, section 11)."""
-    return dt_utc_naive.strftime("%Y-%m-%dT%H")
+def bucket_hour(dt_utc_naive: datetime) -> str:
+    """Compact hourly UTC bucket, e.g. ``2026061008`` (spec 06)."""
+    return dt_utc_naive.strftime("%Y%m%d%H")
+
+
+def bucket_shard(key: str, shard_count: int = DEFAULT_BUCKET_SHARDS) -> int:
+    """Stable shard number for a run/key."""
+    digest = hashlib.sha256(key.encode("utf-8")).hexdigest()
+    return int(digest[:8], 16) % shard_count
+
+
+def scheduled_bucket(
+    dt_utc_naive: datetime,
+    key: str,
+    shard_count: int = DEFAULT_BUCKET_SHARDS,
+) -> str:
+    """Sharded scheduled bucket, e.g. ``2026061008#S003``."""
+    shard = bucket_shard(key, shard_count)
+    return f"{bucket_hour(dt_utc_naive)}#S{shard:03d}"
+
+
+def time_bucket(dt_utc_naive: datetime, key: str | None = None) -> str:
+    """Scheduled bucket compatibility wrapper.
+
+    Spec 06 uses sharded buckets when a key is provided. Callers that only need
+    the hour should use :func:`bucket_hour`.
+    """
+    if key is None:
+        return bucket_hour(dt_utc_naive)
+    return scheduled_bucket(dt_utc_naive, key)
 
 
 def validate_timezone(tz_name: str) -> ZoneInfo:
@@ -74,7 +103,12 @@ def next_recurring_run_utc(
     """
     tz = ZoneInfo(tz_name)
     after_local = after_utc_naive.replace(tzinfo=UTC).astimezone(tz)
-    nxt_local = croniter(schedule, after_local).get_next(datetime)
+    # Croniter can carry the old UTC offset across fall-back transitions when
+    # given an aware datetime. Iterate in local wall-clock time, then attach the
+    # IANA zone so conversion uses the offset valid at the resulting instant.
+    after_wall = after_local.replace(tzinfo=None)
+    nxt_wall = croniter(schedule, after_wall).get_next(datetime)
+    nxt_local = nxt_wall.replace(tzinfo=tz)
     return nxt_local.astimezone(UTC).replace(tzinfo=None, microsecond=0)
 
 

@@ -51,7 +51,7 @@ RUN_CANCELLED = "cancelled"
 # Runs the watcher/delete logic may still cancel (not yet started executing).
 RUN_CANCELLABLE = {RUN_PENDING, RUN_QUEUED}
 
-# --- Run trigger reasons (spec 05/06 attempt metadata) --------------------
+# --- Run trigger reasons / scheduling metadata (spec 05/06) ---------------
 TRIGGER_IMMEDIATE = "immediate"
 TRIGGER_SCHEDULED = "scheduled"
 TRIGGER_RETRY = "retry"
@@ -123,7 +123,9 @@ class JobRun(Base):
     # Copied from the parent job so run queries can filter by owner directly.
     user_id: Mapped[str] = mapped_column(String(64))
     scheduled_at: Mapped[datetime] = mapped_column(DateTime)
-    scheduled_bucket: Mapped[str] = mapped_column(String(13))
+    scheduled_bucket_hour: Mapped[str | None] = mapped_column(String(10), nullable=True)
+    scheduled_bucket_shard: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    scheduled_bucket: Mapped[str] = mapped_column(String(20))
     started_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     finished_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     status: Mapped[str] = mapped_column(String(16), default=RUN_PENDING)
@@ -147,6 +149,12 @@ class JobRun(Base):
         Index(
             "idx_runs_bucket_status_sched",
             "scheduled_bucket",
+            "status",
+            "scheduled_at",
+        ),
+        Index(
+            "idx_runs_bucket_hour_status_sched",
+            "scheduled_bucket_hour",
             "status",
             "scheduled_at",
         ),

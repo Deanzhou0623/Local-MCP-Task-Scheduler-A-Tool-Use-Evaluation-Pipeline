@@ -31,6 +31,7 @@ from app.jobs.schemas import (
     DeleteJobToolArgs,
     GetJobToolArgs,
     ListJobsParams,
+    ListRunsParams,
     ModifyJobRequest,
     ModifyJobToolArgs,
     TraceGetToolArgs,
@@ -41,6 +42,7 @@ from app.jobs.service import (
     get_job,
     get_trace,
     list_jobs,
+    list_runs,
     modify_job,
 )
 
@@ -117,6 +119,7 @@ def modify_task(args: dict) -> dict:
         action=parsed.action,
         status=parsed.status,
         job_params=parsed.job_params,
+        action_params=parsed.action_params,
     )
     return _execute(lambda db: modify_job(db, job_id=parsed.job_id, req=body))
 
@@ -139,6 +142,13 @@ def get_trace_task(args: dict) -> dict:
     )
 
 
+def list_runs_task(args: dict) -> dict:
+    parsed = _parse(ListRunsParams, args)
+    if isinstance(parsed, dict):
+        return parsed
+    return _execute(lambda db: list_runs(db, parsed))
+
+
 # ---------------------------------------------------------------------------
 # Registry + dispatch
 # ---------------------------------------------------------------------------
@@ -149,6 +159,7 @@ TOOL_REGISTRY: dict[str, Callable[[dict], dict]] = {
     "task.modify@v1": modify_task,
     "task.delete@v1": delete_task,
     "task.trace.get@v1": get_trace_task,
+    "task.runs.list@v1": list_runs_task,
 }
 
 

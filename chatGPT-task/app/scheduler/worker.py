@@ -22,8 +22,7 @@ from sqlalchemy import select
 
 from app.core.database import SessionLocal
 from app.core.errors import AppError
-from app.core.ids import new_attempt_group_id, new_run_id
-from app.core.timeutils import next_recurring_run_utc, time_bucket, utcnow_naive
+from app.core.timeutils import next_recurring_run_utc, utcnow_naive
 from app.jobs.executors import (
     ACTION_FAILED_PERMANENT,
     ACTION_FAILED_RETRYABLE,
@@ -33,7 +32,6 @@ from app.jobs.executors import (
     ActionContext,
 )
 from app.jobs.models import (
-    DEFAULT_PRIORITY,
     JOB_COMPLETED,
     JOB_DELETED,
     JOB_FAILED,
@@ -50,12 +48,12 @@ from app.jobs.models import (
     TRACE_RUNNING,
     TRACE_SKIPPED,
     TRACE_SUCCEEDED,
-    TRIGGER_RETRY,
     TYPE_RECURRING,
     Job,
     JobRun,
     JobRunQueue,
 )
+from app.jobs.runs import new_run_for_job, retry_run_for_job
 from app.jobs.service import job_action_params
 from app.jobs.traces import create_trace_for_run, finish_trace
 from app.scheduler.queue import (
@@ -188,20 +186,7 @@ def _execute_with_trace(db: Session, run: JobRun, job: Job) -> str:
 
 
 def _create_next_run(db: Session, job: Job, scheduled_at_utc: datetime) -> None:
-    db.add(
-        JobRun(
-            run_id=new_run_id(),
-            job_id=job.job_id,
-            user_id=job.user_id,
-            scheduled_at=scheduled_at_utc,
-            scheduled_bucket=time_bucket(scheduled_at_utc),
-            status=RUN_PENDING,
-            attempt_group_id=new_attempt_group_id(),
-            attempt_number=1,
-            trigger_reason="scheduled",
-            priority=DEFAULT_PRIORITY,
-        )
-    )
+    db.add(new_run_for_job(job, scheduled_at_utc))
 
 
 def _retry_backoff_seconds(retry_count: int) -> int:
@@ -210,26 +195,16 @@ def _retry_backoff_seconds(retry_count: int) -> int:
 
 
 def create_retry_run(db: Session, run: JobRun, *, now: datetime | None = None) -> JobRun:
-    """Create the next retry attempt for a failed run."""
+    """Create the next retry attempt for a failed run.
+
+    Built via the spec 06 ``retry_run_for_job`` helper so the retry inherits the
+    attempt group, a fresh sharded bucket, and attempt metadata.
+    """
     now = now or utcnow_naive()
-    next_retry_count = (run.retry_count or 0) + 1
     scheduled_at = now + timedelta(seconds=_retry_backoff_seconds(run.retry_count or 0))
-    retry = JobRun(
-        run_id=new_run_id(),
-        job_id=run.job_id,
-        user_id=run.user_id,
-        scheduled_at=scheduled_at,
-        scheduled_bucket=time_bucket(scheduled_at),
-        status=RUN_PENDING,
-        retry_count=next_retry_count,
-        attempt_group_id=run.attempt_group_id or new_attempt_group_id(),
-        attempt_number=(run.attempt_number or 1) + 1,
-        parent_run_id=run.run_id,
-        trigger_reason=TRIGGER_RETRY,
-        priority=run.priority or DEFAULT_PRIORITY,
-    )
-    db.add(retry)
     job = db.get(Job, run.job_id)
+    retry = retry_run_for_job(job, run, scheduled_at)
+    db.add(retry)
     if job is not None and job.status not in (JOB_DELETED, JOB_PAUSED):
         job.status = JOB_SCHEDULED
     db.flush()

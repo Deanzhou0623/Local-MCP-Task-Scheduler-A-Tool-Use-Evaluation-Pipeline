@@ -12,7 +12,7 @@ from __future__ import annotations
 import json
 from datetime import datetime
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.core.errors import (
@@ -23,7 +23,7 @@ from app.core.errors import (
     VALIDATION_ERROR,
     AppError,
 )
-from app.core.ids import new_attempt_group_id, new_job_id, new_run_id
+from app.core.ids import new_job_id
 from app.jobs.actions import SUPPORTED_ACTIONS, is_supported
 from app.jobs.executors import validate_action_params
 from app.jobs.models import (
@@ -44,10 +44,12 @@ from app.jobs.models import (
     Job,
     JobRun,
 )
+from app.jobs.runs import new_run_for_job
 from app.jobs.schemas import (
     CreateJobRequest,
     JobParamsCreate,
     ListJobsParams,
+    ListRunsParams,
     ModifyJobRequest,
 )
 from app.jobs.traces import (
@@ -61,7 +63,6 @@ from app.core.timeutils import (
     iso_utc,
     next_recurring_run_utc,
     one_time_to_utc,
-    time_bucket,
     utcnow_naive,
     validate_cron,
     validate_timezone,
@@ -100,17 +101,40 @@ def serialize_job(job: Job) -> dict:
 
 def serialize_run(run: JobRun) -> dict:
     """Short run representation used in ``next_run`` and run history."""
+    queue_delay = _seconds_between(run.scheduled_at, run.started_at)
+    execution = _seconds_between(run.started_at, run.finished_at)
+    lateness = _seconds_between(run.scheduled_at, run.finished_at)
     return {
         "run_id": run.run_id,
         "job_id": run.job_id,
         "scheduled_at": iso_in_tz(run.scheduled_at, _run_tz(run)),
+        "started_at": iso_in_tz(run.started_at, _run_tz(run)),
+        "finished_at": iso_in_tz(run.finished_at, _run_tz(run)),
         "status": run.status,
+        "scheduled_bucket": run.scheduled_bucket,
+        "scheduled_bucket_hour": run.scheduled_bucket_hour,
+        "scheduled_bucket_shard": run.scheduled_bucket_shard,
+        "attempt_group_id": run.attempt_group_id,
+        "attempt_number": run.attempt_number,
+        "parent_run_id": run.parent_run_id,
+        "trigger_reason": run.trigger_reason,
+        "priority": run.priority,
+        "deadline_at": iso_in_tz(run.deadline_at, _run_tz(run)),
+        "queue_delay_seconds": queue_delay,
+        "execution_seconds": execution,
+        "lateness_seconds": lateness,
     }
 
 
 def _run_tz(run: JobRun) -> str:
     # Present a run's scheduled_at in its parent job's timezone.
     return run.job.timezone if run.job is not None else "UTC"
+
+
+def _seconds_between(start: datetime | None, end: datetime | None) -> int | None:
+    if start is None or end is None:
+        return None
+    return int((end - start).total_seconds())
 
 
 # ---------------------------------------------------------------------------
@@ -129,19 +153,7 @@ def _load_owned_job(db: Session, job_id: str, user_id: str) -> Job:
 
 
 def _create_run(db: Session, job: Job, scheduled_at_utc: datetime) -> JobRun:
-    trigger_reason = TRIGGER_IMMEDIATE if job.type == TYPE_IMMEDIATE else TRIGGER_SCHEDULED
-    run = JobRun(
-        run_id=new_run_id(),
-        job_id=job.job_id,
-        user_id=job.user_id,
-        scheduled_at=scheduled_at_utc,
-        scheduled_bucket=time_bucket(scheduled_at_utc),
-        status=RUN_PENDING,
-        attempt_group_id=new_attempt_group_id(),
-        attempt_number=1,
-        trigger_reason=trigger_reason,
-        priority=DEFAULT_PRIORITY,
-    )
+    run = new_run_for_job(job, scheduled_at_utc)
     db.add(run)
     return run
 
@@ -384,17 +396,53 @@ def get_job(db: Session, *, job_id: str, user_id: str) -> dict:
         # Embed the run's trace summary so a user can inspect what happened
         # without first knowing the trace id (spec 04, section 8).
         trace = latest_trace_for_run(db, run.run_id)
-        return {
-            "run_id": run.run_id,
-            "scheduled_at": iso_in_tz(run.scheduled_at, job.timezone),
-            "status": run.status,
-            "trace": trace_summary_dict(trace) if trace is not None else None,
-        }
+        data = serialize_run(run)
+        data["trace"] = trace_summary_dict(trace) if trace is not None else None
+        return data
 
     return {
         "ok": True,
         "job": serialize_job(job),
         "runs": [_run_dict(run) for run in runs],
+    }
+
+
+def list_runs(db: Session, params: ListRunsParams) -> dict:
+    """Paginated run history for one owned job (spec 06)."""
+    job = _load_owned_job(db, params.job_id, params.user_id)
+    stmt = select(JobRun).where(JobRun.job_id == job.job_id)
+    count_stmt = select(func.count(JobRun.run_id)).where(JobRun.job_id == job.job_id)
+    if params.status is not None:
+        stmt = stmt.where(JobRun.status == params.status)
+        count_stmt = count_stmt.where(JobRun.status == params.status)
+
+    total = db.execute(count_stmt).scalar_one()
+    offset = (params.page - 1) * params.page_size
+    runs = (
+        db.execute(
+            stmt.order_by(JobRun.scheduled_at.desc(), JobRun.run_id.desc())
+            .offset(offset)
+            .limit(params.page_size)
+        )
+        .scalars()
+        .all()
+    )
+
+    items = []
+    for run in runs:
+        trace = latest_trace_for_run(db, run.run_id)
+        data = serialize_run(run)
+        data["trace"] = trace_summary_dict(trace) if trace is not None else None
+        items.append(data)
+
+    return {
+        "ok": True,
+        "runs": items,
+        "pagination": {
+            "page": params.page,
+            "page_size": params.page_size,
+            "total": total,
+        },
     }
 
 
