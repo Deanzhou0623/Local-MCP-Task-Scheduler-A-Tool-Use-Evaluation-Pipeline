@@ -14,7 +14,7 @@ from fastapi import FastAPI
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
-from app.api.routes import router, trace_router
+from app.api.routes import router, scheduler_router, trace_router
 from app.core.database import Base, engine
 from app.core.errors import VALIDATION_ERROR, AppError, error_envelope
 from app.jobs import models  # noqa: F401 - ensure tables are registered
@@ -49,3 +49,4 @@ async def _validation_handler(_request, exc: RequestValidationError) -> JSONResp
 
 app.include_router(router)
 app.include_router(trace_router)
+app.include_router(scheduler_router)

@@ -1,4 +1,4 @@
-"""Worker: execute a queued run and advance its parent job (spec 01 §12, spec 04 §5).
+"""Worker: execute queued runs and advance parent jobs.
 
 ``process_run`` is the testable core — it runs one run synchronously, with no
 threads — and ``worker_loop`` is the thin loop that drains the queue and calls
@@ -13,22 +13,34 @@ counts as success for the run, the distinction living on the trace.
 
 from __future__ import annotations
 
-from datetime import datetime
+import uuid
+from datetime import datetime, timedelta
+from queue import Empty
 
 from sqlalchemy.orm import Session
+from sqlalchemy import select
 
 from app.core.database import SessionLocal
 from app.core.errors import AppError
-from app.core.ids import new_run_id
+from app.core.ids import new_attempt_group_id, new_run_id
 from app.core.timeutils import next_recurring_run_utc, time_bucket, utcnow_naive
-from app.jobs.executors import EXECUTORS, ActionContext
+from app.jobs.executors import (
+    ACTION_FAILED_PERMANENT,
+    ACTION_FAILED_RETRYABLE,
+    ACTION_SKIPPED,
+    ACTION_SUCCEEDED,
+    EXECUTORS,
+    ActionContext,
+)
 from app.jobs.models import (
+    DEFAULT_PRIORITY,
     JOB_COMPLETED,
     JOB_DELETED,
     JOB_FAILED,
     JOB_PAUSED,
     JOB_RUNNING,
     JOB_SCHEDULED,
+    QUEUE_LEASED,
     RUN_FAILED,
     RUN_PENDING,
     RUN_QUEUED,
@@ -38,30 +50,53 @@ from app.jobs.models import (
     TRACE_RUNNING,
     TRACE_SKIPPED,
     TRACE_SUCCEEDED,
+    TRIGGER_RETRY,
     TYPE_RECURRING,
     Job,
     JobRun,
+    JobRunQueue,
 )
 from app.jobs.service import job_action_params
 from app.jobs.traces import create_trace_for_run, finish_trace
-from app.scheduler.queue import run_queue
+from app.scheduler.queue import (
+    claim_next_queue_item,
+    complete_queue_item,
+    fail_queue_item,
+    run_queue,
+)
 
 # ActionResult.status -> trace status (spec 04, section 5 mapping table).
 _RESULT_TO_TRACE = {
-    "succeeded": TRACE_SUCCEEDED,
-    "skipped": TRACE_SKIPPED,
+    ACTION_SUCCEEDED: TRACE_SUCCEEDED,
+    ACTION_SKIPPED: TRACE_SKIPPED,
     "failed": TRACE_FAILED,
+    ACTION_FAILED_RETRYABLE: TRACE_FAILED,
+    ACTION_FAILED_PERMANENT: TRACE_FAILED,
 }
+
+MAX_RETRIES = 3
+RETRY_BACKOFFS = (30, 120, 600)
+WORKER_LEASE_SECONDS = 60
+WORKER_POLL_INTERVAL_SECONDS = 1
+# Stale-running recovery must wait longer than a lease so it never races a live
+# worker; a run is only recovered once its lease has genuinely expired.
+STALE_RUNNING_SECONDS = WORKER_LEASE_SECONDS * 2
 
 
 def process_run(db: Session, run_id: str) -> JobRun | None:
     """Execute a single run and advance its parent job. Returns the run."""
+    run, _result_status = _process_run_result(db, run_id)
+    return run
+
+
+def _process_run_result(db: Session, run_id: str) -> tuple[JobRun | None, str | None]:
+    """Execute a run and return both the row and executor result status."""
     run = db.get(JobRun, run_id)
     if run is None:
-        return None
+        return None, None
     job = db.get(Job, run.job_id)
     if job is None or run.status not in (RUN_QUEUED, RUN_PENDING):
-        return run
+        return run, None
 
     run.status = RUN_RUNNING
     run.started_at = utcnow_naive()
@@ -69,7 +104,11 @@ def process_run(db: Session, run_id: str) -> JobRun | None:
     db.commit()
 
     result_status = _execute_with_trace(db, run, job)
-    run.status = RUN_SUCCEEDED if result_status in ("succeeded", "skipped") else RUN_FAILED
+    run.status = (
+        RUN_SUCCEEDED
+        if result_status in (ACTION_SUCCEEDED, ACTION_SKIPPED)
+        else RUN_FAILED
+    )
     run.finished_at = utcnow_naive()
 
     if run.status == RUN_SUCCEEDED:
@@ -87,7 +126,7 @@ def process_run(db: Session, run_id: str) -> JobRun | None:
         job.status = JOB_FAILED
 
     db.commit()
-    return run
+    return run, result_status
 
 
 def _execute_with_trace(db: Session, run: JobRun, job: Job) -> str:
@@ -109,7 +148,7 @@ def _execute_with_trace(db: Session, run: JobRun, job: Job) -> str:
         finish_trace(db, trace, TRACE_FAILED, error=message)
         run.error_message = message
         db.commit()
-        return "failed"
+        return ACTION_FAILED_PERMANENT
 
     ctx = ActionContext(
         trace_id=trace.trace_id,
@@ -127,12 +166,12 @@ def _execute_with_trace(db: Session, run: JobRun, job: Job) -> str:
         finish_trace(db, trace, TRACE_FAILED, error=exc.message)
         run.error_message = exc.message
         db.commit()
-        return "failed"
+        return ACTION_FAILED_PERMANENT
     except Exception as exc:  # noqa: BLE001 - record any failure as a trace
         finish_trace(db, trace, TRACE_FAILED, error=str(exc))
         run.error_message = str(exc)
         db.commit()
-        return "failed"
+        return ACTION_FAILED_RETRYABLE
 
     finish_trace(
         db,
@@ -140,9 +179,9 @@ def _execute_with_trace(db: Session, run: JobRun, job: Job) -> str:
         _RESULT_TO_TRACE[result.status],
         summary=result.summary,
         artifact=result.artifact,
-        error=result.summary if result.status == "failed" else None,
+        error=result.summary if result.status.startswith("failed") else None,
     )
-    if result.status == "failed":
+    if result.status.startswith("failed"):
         run.error_message = result.summary
     db.commit()
     return result.status
@@ -157,17 +196,184 @@ def _create_next_run(db: Session, job: Job, scheduled_at_utc: datetime) -> None:
             scheduled_at=scheduled_at_utc,
             scheduled_bucket=time_bucket(scheduled_at_utc),
             status=RUN_PENDING,
+            attempt_group_id=new_attempt_group_id(),
+            attempt_number=1,
+            trigger_reason="scheduled",
+            priority=DEFAULT_PRIORITY,
         )
     )
 
 
-def worker_loop() -> None:
-    """Drain the queue, executing each run."""
+def _retry_backoff_seconds(retry_count: int) -> int:
+    idx = min(max(retry_count, 0), len(RETRY_BACKOFFS) - 1)
+    return RETRY_BACKOFFS[idx]
+
+
+def create_retry_run(db: Session, run: JobRun, *, now: datetime | None = None) -> JobRun:
+    """Create the next retry attempt for a failed run."""
+    now = now or utcnow_naive()
+    next_retry_count = (run.retry_count or 0) + 1
+    scheduled_at = now + timedelta(seconds=_retry_backoff_seconds(run.retry_count or 0))
+    retry = JobRun(
+        run_id=new_run_id(),
+        job_id=run.job_id,
+        user_id=run.user_id,
+        scheduled_at=scheduled_at,
+        scheduled_bucket=time_bucket(scheduled_at),
+        status=RUN_PENDING,
+        retry_count=next_retry_count,
+        attempt_group_id=run.attempt_group_id or new_attempt_group_id(),
+        attempt_number=(run.attempt_number or 1) + 1,
+        parent_run_id=run.run_id,
+        trigger_reason=TRIGGER_RETRY,
+        priority=run.priority or DEFAULT_PRIORITY,
+    )
+    db.add(retry)
+    job = db.get(Job, run.job_id)
+    if job is not None and job.status not in (JOB_DELETED, JOB_PAUSED):
+        job.status = JOB_SCHEDULED
+    db.flush()
+    return retry
+
+
+def _has_live_lease(db: Session, run_id: str, now: datetime) -> bool:
+    """True if a queue item still holds an unexpired lease for this run."""
+    return (
+        db.execute(
+            select(JobRunQueue.queue_id).where(
+                JobRunQueue.run_id == run_id,
+                JobRunQueue.status == QUEUE_LEASED,
+                JobRunQueue.locked_until > now,
+            )
+        ).scalar_one_or_none()
+        is not None
+    )
+
+
+def recover_stale_running_runs(
+    db: Session,
+    *,
+    now: datetime | None = None,
+    stale_after_seconds: int = STALE_RUNNING_SECONDS,
+    max_retries: int = MAX_RETRIES,
+) -> int:
+    """Fail stale running attempts and create retry attempts when allowed.
+
+    A run is only recovered once it has been running past ``stale_after_seconds``
+    *and* no queue item still holds a live lease — so recovery never races a
+    worker that is genuinely still executing the run.
+    """
+    now = now or utcnow_naive()
+    cutoff = now - timedelta(seconds=stale_after_seconds)
+    runs = db.execute(
+        select(JobRun).where(
+            JobRun.status == RUN_RUNNING,
+            JobRun.started_at <= cutoff,
+        )
+    ).scalars().all()
+    recovered = 0
+    for run in runs:
+        if _has_live_lease(db, run.run_id, now):
+            # A worker still holds a valid lease; not actually stale.
+            continue
+        message = "Run exceeded worker lease and was recovered."
+        run.status = RUN_FAILED
+        run.finished_at = now
+        run.error_message = message
+        job = db.get(Job, run.job_id)
+        if job is not None:
+            job.status = JOB_FAILED
+        for item in db.execute(
+            select(JobRunQueue).where(
+                JobRunQueue.run_id == run.run_id,
+                JobRunQueue.status.in_(("ready", "leased")),
+            )
+        ).scalars().all():
+            fail_queue_item(db, item, message)
+        if (run.retry_count or 0) < max_retries:
+            create_retry_run(db, run, now=now)
+        recovered += 1
+    db.flush()
+    return recovered
+
+
+def process_queue_item(
+    db: Session, item: JobRunQueue, *, max_retries: int = MAX_RETRIES
+) -> JobRun | None:
+    """Execute a leased queue item and finalize queue/retry state."""
+    run, result_status = _process_run_result(db, item.run_id)
+    if run is None:
+        fail_queue_item(db, item, "Run not found.")
+        db.commit()
+        return None
+
+    if run.status == RUN_SUCCEEDED:
+        complete_queue_item(db, item)
+    else:
+        fail_queue_item(db, item, run.error_message)
+        if (
+            result_status == ACTION_FAILED_RETRYABLE
+            and (run.retry_count or 0) < max_retries
+        ):
+            create_retry_run(db, run)
+    db.commit()
+    return run
+
+
+def claim_and_process_once(
+    db: Session, *, worker_id: str, lease_seconds: int
+) -> JobRun | None:
+    """Claim at most one ready queue item and execute it. Returns the run."""
+    item = claim_next_queue_item(
+        db, worker_id=worker_id, lease_seconds=lease_seconds
+    )
+    if item is None:
+        db.commit()
+        return None
+    db.commit()
+    return process_queue_item(db, item)
+
+
+def _drain_one_signal() -> None:
+    """Consume one in-memory wakeup signal without blocking.
+
+    ``run_queue`` is only a best-effort latency hint; the durable table is the
+    source of truth. Draining one signal per processed item keeps the in-memory
+    queue from growing unbounded under load.
+    """
+    try:
+        run_queue.get_nowait()
+    except Empty:
+        pass
+
+
+def worker_loop(
+    *,
+    worker_id: str | None = None,
+    lease_seconds: int = WORKER_LEASE_SECONDS,
+    poll_interval: int = WORKER_POLL_INTERVAL_SECONDS,
+) -> None:
+    """Claim and execute durable queue rows, waking promptly on new work.
+
+    When idle, block on the wakeup signal (up to ``poll_interval``) so a freshly
+    enqueued run runs without waiting a full poll. When busy, loop immediately
+    and drain one signal per processed item so ``run_queue`` cannot grow.
+    """
+    worker_id = worker_id or f"worker_{uuid.uuid4().hex[:12]}"
     while True:
-        run_id = run_queue.get()
         db = SessionLocal()
         try:
-            process_run(db, run_id)
+            processed = claim_and_process_once(
+                db, worker_id=worker_id, lease_seconds=lease_seconds
+            )
         finally:
             db.close()
-            run_queue.task_done()
+        if processed is None:
+            # Idle: wait for a wakeup signal or time out. Either way the signal
+            # is consumed, so the queue never accumulates.
+            try:
+                run_queue.get(timeout=poll_interval)
+            except Empty:
+                pass
+        else:
+            _drain_one_signal()

@@ -51,6 +51,21 @@ RUN_CANCELLED = "cancelled"
 # Runs the watcher/delete logic may still cancel (not yet started executing).
 RUN_CANCELLABLE = {RUN_PENDING, RUN_QUEUED}
 
+# --- Run trigger reasons (spec 05/06 attempt metadata) --------------------
+TRIGGER_IMMEDIATE = "immediate"
+TRIGGER_SCHEDULED = "scheduled"
+TRIGGER_RETRY = "retry"
+TRIGGER_MANUAL = "manual"
+DEFAULT_PRIORITY = 10
+
+# --- Durable queue statuses (spec 05) --------------------------------------
+QUEUE_READY = "ready"
+QUEUE_LEASED = "leased"
+QUEUE_DONE = "done"
+QUEUE_FAILED = "failed"
+QUEUE_CANCELLED = "cancelled"
+QUEUE_ACTIVE = {QUEUE_READY, QUEUE_LEASED}
+
 # --- Action trace statuses (spec 04) ---------------------------------------
 TRACE_PENDING = "pending"
 TRACE_RUNNING = "running"
@@ -113,6 +128,12 @@ class JobRun(Base):
     finished_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     status: Mapped[str] = mapped_column(String(16), default=RUN_PENDING)
     retry_count: Mapped[int] = mapped_column(Integer, default=0)
+    attempt_group_id: Mapped[str | None] = mapped_column(String(48), nullable=True)
+    attempt_number: Mapped[int] = mapped_column(Integer, default=1)
+    parent_run_id: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    trigger_reason: Mapped[str] = mapped_column(String(16), default=TRIGGER_SCHEDULED)
+    priority: Mapped[int] = mapped_column(Integer, default=DEFAULT_PRIORITY)
+    deadline_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow_naive)
     updated_at: Mapped[datetime] = mapped_column(
@@ -131,10 +152,63 @@ class JobRun(Base):
         ),
         # Job detail + run history.
         Index("idx_runs_job_sched", "job_id", "scheduled_at"),
+        # Retry/run-history lookups by logical attempt group.
+        Index("idx_runs_attempt_group", "attempt_group_id", "attempt_number"),
     )
 
     def __repr__(self) -> str:  # pragma: no cover - debugging aid
         return f"<JobRun {self.run_id} job={self.job_id} status={self.status!r}>"
+
+
+class JobRunQueue(Base):
+    """Durable queue item for executing one ``JobRun`` (spec 05).
+
+    The in-memory queue is no longer the source of truth. Watchers enqueue due
+    runs here, and workers claim rows with a lease.
+    """
+
+    __tablename__ = "job_run_queue"
+
+    queue_id: Mapped[str] = mapped_column(String(48), primary_key=True)
+    run_id: Mapped[str] = mapped_column(
+        String(40), ForeignKey("job_runs.run_id"), index=True
+    )
+    user_id: Mapped[str] = mapped_column(String(64))
+    priority: Mapped[int] = mapped_column(Integer, default=DEFAULT_PRIORITY)
+    status: Mapped[str] = mapped_column(String(16), default=QUEUE_READY)
+    available_at: Mapped[datetime] = mapped_column(DateTime)
+    locked_by: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    locked_until: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    attempt_number: Mapped[int] = mapped_column(Integer, default=1)
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow_naive)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, default=utcnow_naive, onupdate=utcnow_naive
+    )
+
+    run: Mapped["JobRun"] = relationship()
+
+    __table_args__ = (
+        Index(
+            "idx_queue_ready_priority_available",
+            "status",
+            "priority",
+            "available_at",
+        ),
+        Index("idx_queue_run_status", "run_id", "status"),
+        Index("idx_queue_locked_until", "status", "locked_until"),
+    )
+
+    def __repr__(self) -> str:  # pragma: no cover - debugging aid
+        return f"<JobRunQueue {self.queue_id} run={self.run_id} status={self.status!r}>"
+
+
+Index(
+    "uq_queue_active_run",
+    JobRunQueue.run_id,
+    unique=True,
+    sqlite_where=JobRunQueue.status.in_([QUEUE_READY, QUEUE_LEASED]),
+)
 
 
 class ActionTrace(Base):

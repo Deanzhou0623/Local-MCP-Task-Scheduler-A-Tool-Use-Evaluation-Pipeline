@@ -26,7 +26,12 @@ from sqlalchemy.orm import Session
 
 from app.core.errors import VALIDATION_ERROR, AppError
 from app.core.ids import new_trace_event_id
-from app.jobs.models import EVENT_FAILED, EVENT_SUCCEEDED
+from app.jobs.models import EVENT_FAILED, EVENT_SKIPPED, EVENT_SUCCEEDED, JobRun
+
+ACTION_SUCCEEDED = "succeeded"
+ACTION_SKIPPED = "skipped"
+ACTION_FAILED_RETRYABLE = "failed_retryable"
+ACTION_FAILED_PERMANENT = "failed_permanent"
 
 # Required ``action_params`` keys per action. Actions absent from this map have
 # no required params (e.g. the placeholder actions).
@@ -49,7 +54,13 @@ class ActionContext:
 
 @dataclass
 class ActionResult:
-    status: Literal["succeeded", "failed", "skipped"]
+    status: Literal[
+        "succeeded",
+        "failed",
+        "skipped",
+        "failed_retryable",
+        "failed_permanent",
+    ]
     summary: str
     artifact: Optional[dict] = None
 
@@ -122,6 +133,34 @@ class PlaceholderExecutor:
         self.action = action
 
     def execute(self, ctx: ActionContext) -> ActionResult:
+        if ctx.params.get("pipeline") == "checkpoint":
+            return self._execute_checkpoint_pipeline(ctx)
+
+        fail_mode = ctx.params.get("fail_mode")
+        if fail_mode == "retryable":
+            _append_event(
+                ctx,
+                stage="mock_execute",
+                status=EVENT_FAILED,
+                output={"action": self.action, "provider": "mock"},
+                error="Simulated retryable failure",
+            )
+            return ActionResult(
+                status=ACTION_FAILED_RETRYABLE,
+                summary=f"Mock retryable failure for '{self.action}'.",
+            )
+        if fail_mode == "permanent":
+            _append_event(
+                ctx,
+                stage="mock_execute",
+                status=EVENT_FAILED,
+                output={"action": self.action, "provider": "mock"},
+                error="Simulated permanent failure",
+            )
+            return ActionResult(
+                status=ACTION_FAILED_PERMANENT,
+                summary=f"Mock permanent failure for '{self.action}'.",
+            )
         _append_event(
             ctx,
             stage="mock_execute",
@@ -129,8 +168,59 @@ class PlaceholderExecutor:
             output={"action": self.action, "provider": "mock"},
         )
         return ActionResult(
-            status="succeeded",
+            status=ACTION_SUCCEEDED,
             summary=f"Mock executed action '{self.action}'.",
+        )
+
+    def _execute_checkpoint_pipeline(self, ctx: ActionContext) -> ActionResult:
+        from app.jobs.traces import completed_stages_for_attempt_group
+
+        run = ctx.db.get(JobRun, ctx.run_id)
+        completed = completed_stages_for_attempt_group(
+            ctx.db, run.attempt_group_id if run is not None else None
+        )
+
+        def stage(name: str, output: dict | None = None) -> None:
+            if name in completed:
+                _append_event(
+                    ctx,
+                    stage=name,
+                    status=EVENT_SKIPPED,
+                    output={"resumed": True},
+                )
+            else:
+                _append_event(
+                    ctx,
+                    stage=name,
+                    status=EVENT_SUCCEEDED,
+                    output=output or {"ok": True},
+                )
+
+        stage("validate_input")
+        stage("mock_llm_call", {"summary": "cached expensive report"})
+        stage("render_result", {"format": "text"})
+
+        should_fail_notification = ctx.params.get("fail_at") == "send_notification" or (
+            ctx.params.get("fail_once_at") == "send_notification"
+            and run is not None
+            and (run.attempt_number or 1) == 1
+        )
+        if should_fail_notification:
+            _append_event(
+                ctx,
+                stage="send_notification",
+                status=EVENT_FAILED,
+                error="Simulated notification timeout",
+            )
+            return ActionResult(
+                status=ACTION_FAILED_RETRYABLE,
+                summary="Notification failed after checkpointed report generation.",
+            )
+
+        stage("send_notification", {"provider": "mock"})
+        return ActionResult(
+            status=ACTION_SUCCEEDED,
+            summary=f"Mock checkpoint pipeline completed for '{self.action}'.",
         )
 
 
@@ -175,7 +265,7 @@ class SendEmailMockExecutor:
             ctx, stage="mock_send_email", status=EVENT_SUCCEEDED, output=artifact
         )
         return ActionResult(
-            status="succeeded",
+            status=ACTION_SUCCEEDED,
             summary=f"Mock email prepared for {ctx.params['to']}.",
             artifact=artifact,
         )
@@ -212,7 +302,7 @@ class SendReminderMockExecutor:
             ctx, stage="mock_remind", status=EVENT_SUCCEEDED, output={"text": text}
         )
         return ActionResult(
-            status="succeeded", summary=f"Mock reminder prepared: {text[:60]}"
+            status=ACTION_SUCCEEDED, summary=f"Mock reminder prepared: {text[:60]}"
         )
 
 

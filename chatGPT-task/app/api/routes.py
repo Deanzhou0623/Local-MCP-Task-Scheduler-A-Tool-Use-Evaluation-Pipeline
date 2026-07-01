@@ -28,11 +28,18 @@ from app.jobs.service import (
     list_jobs,
     modify_job,
 )
+from app.scheduler.queue import scheduler_status
 
 router = APIRouter(prefix="/v1/jobs", tags=["jobs"])
 
 # Execution traces live under their own resource (spec 04, section 8).
 trace_router = APIRouter(prefix="/v1/traces", tags=["traces"])
+scheduler_router = APIRouter(prefix="/v1/scheduler", tags=["scheduler"])
+
+
+@scheduler_router.get("/status")
+def scheduler_status_detail(db: Session = Depends(get_session)) -> dict:
+    return scheduler_status(db)
 
 
 @trace_router.get("/{trace_id}")
