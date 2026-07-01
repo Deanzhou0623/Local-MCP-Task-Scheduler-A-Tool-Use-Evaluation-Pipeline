@@ -114,6 +114,24 @@ def latest_trace_for_run(db: Session, run_id: str) -> ActionTrace | None:
     ).scalar_one_or_none()
 
 
+def completed_stages_for_attempt_group(
+    db: Session, attempt_group_id: str | None
+) -> set[str]:
+    """Stages that succeeded in any previous attempt in the same group."""
+    if not attempt_group_id:
+        return set()
+    stmt = (
+        select(ActionTraceEvent.stage)
+        .join(ActionTrace, ActionTrace.trace_id == ActionTraceEvent.trace_id)
+        .join(JobRun, JobRun.run_id == ActionTrace.run_id)
+        .where(
+            JobRun.attempt_group_id == attempt_group_id,
+            ActionTraceEvent.status == "succeeded",
+        )
+    )
+    return set(db.execute(stmt).scalars().all())
+
+
 # ---------------------------------------------------------------------------
 # Serializers
 # ---------------------------------------------------------------------------

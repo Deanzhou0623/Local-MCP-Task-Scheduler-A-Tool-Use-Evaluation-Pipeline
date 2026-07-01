@@ -23,7 +23,7 @@ from app.core.errors import (
     VALIDATION_ERROR,
     AppError,
 )
-from app.core.ids import new_job_id, new_run_id
+from app.core.ids import new_attempt_group_id, new_job_id, new_run_id
 from app.jobs.actions import SUPPORTED_ACTIONS, is_supported
 from app.jobs.executors import validate_action_params
 from app.jobs.models import (
@@ -34,6 +34,9 @@ from app.jobs.models import (
     RUN_CANCELLABLE,
     RUN_CANCELLED,
     RUN_PENDING,
+    DEFAULT_PRIORITY,
+    TRIGGER_IMMEDIATE,
+    TRIGGER_SCHEDULED,
     TYPE_IMMEDIATE,
     TYPE_ONE_TIME,
     TYPE_RECURRING,
@@ -52,6 +55,7 @@ from app.jobs.traces import (
     trace_summary_dict,
     trace_to_dict,
 )
+from app.scheduler.queue import cancel_queue_items_for_run
 from app.core.timeutils import (
     iso_in_tz,
     iso_utc,
@@ -125,6 +129,7 @@ def _load_owned_job(db: Session, job_id: str, user_id: str) -> Job:
 
 
 def _create_run(db: Session, job: Job, scheduled_at_utc: datetime) -> JobRun:
+    trigger_reason = TRIGGER_IMMEDIATE if job.type == TYPE_IMMEDIATE else TRIGGER_SCHEDULED
     run = JobRun(
         run_id=new_run_id(),
         job_id=job.job_id,
@@ -132,6 +137,10 @@ def _create_run(db: Session, job: Job, scheduled_at_utc: datetime) -> JobRun:
         scheduled_at=scheduled_at_utc,
         scheduled_bucket=time_bucket(scheduled_at_utc),
         status=RUN_PENDING,
+        attempt_group_id=new_attempt_group_id(),
+        attempt_number=1,
+        trigger_reason=trigger_reason,
+        priority=DEFAULT_PRIORITY,
     )
     db.add(run)
     return run
@@ -145,6 +154,7 @@ def _cancel_pending_runs(db: Session, job: Job) -> int:
     runs = db.execute(stmt).scalars().all()
     for run in runs:
         run.status = RUN_CANCELLED
+        cancel_queue_items_for_run(db, run.run_id)
     return len(runs)
 
 

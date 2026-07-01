@@ -18,6 +18,14 @@ def new_run_id() -> str:
     return f"run_{uuid.uuid4().hex}"
 
 
+def new_attempt_group_id() -> str:
+    return f"attemptgrp_{uuid.uuid4().hex}"
+
+
+def new_queue_id() -> str:
+    return f"queue_{uuid.uuid4().hex}"
+
+
 def new_trace_id() -> str:
     return f"trace_{uuid.uuid4().hex}"
 

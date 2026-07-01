@@ -16,12 +16,19 @@ from sqlalchemy.orm import Session
 from app.core.database import SessionLocal
 from app.core.timeutils import time_bucket, utcnow_naive
 from app.jobs.models import RUN_PENDING, RUN_QUEUED, JobRun
-from app.scheduler.queue import run_queue
+from app.scheduler.queue import (
+    enqueue_run_once,
+    recover_expired_leases,
+    recover_stranded_queued_runs,
+    run_queue,
+)
+from app.scheduler.worker import recover_stale_running_runs
 
 # Also scan this many past buckets so a run that fell due just before an hour
 # boundary is not missed.
 BUCKET_LOOKBACK_HOURS = 1
 WATCH_BATCH_SIZE = 100
+RECOVERY_INTERVAL_SECONDS = 60
 
 
 def hot_buckets(now_utc: datetime) -> list[str]:
@@ -47,16 +54,44 @@ def find_due_runs(now_utc: datetime, db: Session) -> list[JobRun]:
     return list(db.execute(stmt).scalars().all())
 
 
+def enqueue_due_runs(db: Session, now_utc: datetime | None = None) -> list[str]:
+    """Persist queue rows for due runs and return enqueued run ids."""
+    due = find_due_runs(now_utc or utcnow_naive(), db)
+    ids: list[str] = []
+    for run in due:
+        enqueue_run_once(db, run, priority=run.priority)
+        run.status = RUN_QUEUED
+        ids.append(run.run_id)
+    db.commit()
+    return ids
+
+
+def recovery_tick(db: Session, now_utc: datetime | None = None) -> dict[str, int]:
+    """Run synchronous recovery helpers for stuck queue/run states."""
+    now_utc = now_utc or utcnow_naive()
+    result = {
+        "expired_leases": recover_expired_leases(db, now=now_utc),
+        "stranded_queued": recover_stranded_queued_runs(db),
+        "stale_running": recover_stale_running_runs(db, now=now_utc),
+    }
+    db.commit()
+    return result
+
+
 def watcher_loop(interval: int = 10) -> None:
-    """Scan, mark due runs ``queued``, and hand their ids to the worker."""
+    """Scan, mark due runs ``queued``, and persist durable queue rows."""
+    last_recovery_at: datetime | None = None
     while True:
+        now = utcnow_naive()
         db = SessionLocal()
         try:
-            due = find_due_runs(utcnow_naive(), db)
-            for run in due:
-                run.status = RUN_QUEUED
-            db.commit()
-            ids = [run.run_id for run in due]
+            if (
+                last_recovery_at is None
+                or (now - last_recovery_at).total_seconds() >= RECOVERY_INTERVAL_SECONDS
+            ):
+                recovery_tick(db, now)
+                last_recovery_at = now
+            ids = enqueue_due_runs(db, now)
         finally:
             db.close()
         for run_id in ids:
