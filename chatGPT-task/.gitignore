@@ -5,3 +5,7 @@ __pycache__/
 .env
 .pytest_cache/
 CLAUDE.md
+
+# Eval run outputs (keep the directory, ignore generated runs)
+evals/results/runs/*
+!evals/results/runs/.gitkeep

@@ -6,4 +6,5 @@ sqlalchemy>=2.0.0
 croniter>=2.0.0
 python-dotenv>=1.0.0
 httpx>=0.27.0
+openai>=1.68.0
 pytest>=8.0.0
