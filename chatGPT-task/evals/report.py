@@ -20,6 +20,7 @@ CSV_COLUMNS = [
     "expected_tool", "actual_tool", "expected_action", "actual_action",
     "expected_time", "actual_time", "error_code", "latency_ms",
     "input_tokens", "output_tokens", "failure_reason",
+    "llm_judge_passed", "llm_judge_score", "trace_track", "safety_case",
 ]
 
 
@@ -62,6 +63,9 @@ def _write_openai_payload(out_dir: str, records: list[dict]) -> None:
                 "tool_result": t["tool_calls"][0]["result"] if t["tool_calls"] else None,
                 "final_answer": t["final_answer"],
                 "local_passed": r["passed"],
+                "llm_judge": r.get("llm_judge_passed"),
+                "trace_track": r.get("trace_track", False),
+                "safety_case": r.get("safety_case", False),
             }) + "\n")
 
 
@@ -90,4 +94,6 @@ def _summary(run_meta: dict, records: list[dict]) -> dict:
         "by_grader": {g: {"total": by_grader_total[g], "passed": by_grader_pass[g],
                           "pass_rate": round(by_grader_pass[g] / by_grader_total[g], 4)}
                       for g in sorted(by_grader_total)},
+        "trace_track_cases": sum(1 for r in records if r.get("trace_track")),
+        "safety_cases": sum(1 for r in records if r.get("safety_case")),
     }

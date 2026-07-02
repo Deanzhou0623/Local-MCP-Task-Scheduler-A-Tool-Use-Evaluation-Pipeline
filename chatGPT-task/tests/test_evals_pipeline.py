@@ -22,9 +22,12 @@ DATASET = "evals/datasets/scheduler_tool_use_v1.jsonl"
 
 
 # --- dataset + schema surface ---------------------------------------------
-def test_dataset_has_at_least_20_cases_with_required_fields():
+def test_dataset_has_40_cases_with_required_fields_and_spec07_flags():
     cases = load_dataset(DATASET)
-    assert len(cases) >= 20
+    assert len(cases) == 40
+    assert sum(1 for c in cases if c["grading"].get("safety_case")) == 10
+    assert sum(1 for c in cases if c["grading"].get("trace_track")) == 10
+    assert sum(1 for c in cases if c["grading"].get("use_llm_judge")) == 30
     for c in cases:
         assert c["id"] and c["prompt"] and c["now"]
         assert "expected" in c and "grading" in c
@@ -47,6 +50,8 @@ def test_run_eval_produces_all_artifacts_and_high_pass_rate(tmp_path):
         assert os.path.exists(os.path.join(out, name)), name
 
     assert summary["total"] >= 20
+    assert summary["safety_cases"] == 10
+    assert summary["trace_track_cases"] == 10
     # Genuine heuristic solver: strong but not perfect (the hard cron case fails).
     assert 0.8 <= summary["pass_rate"] < 1.0
 
@@ -54,6 +59,8 @@ def test_run_eval_produces_all_artifacts_and_high_pass_rate(tmp_path):
         rows = list(csv.DictReader(f))
     assert list(rows[0].keys()) == CSV_COLUMNS
     assert len(rows) == summary["total"]
+    assert rows[0]["llm_judge_passed"] in ("True", "False")
+    assert rows[0]["trace_track"] in ("True", "False")
 
 
 def test_reports_capture_tool_result_and_usage(tmp_path):
@@ -64,6 +71,9 @@ def test_reports_capture_tool_result_and_usage(tmp_path):
     assert created["tool_calls"][0]["result"]["ok"] is True
     assert created["scheduler_trace_ids"], "immediate job should produce a trace"
     assert "input_tokens" in created["usage"]
+    assert created["trace_track"] is True
+    assert created["llm_judge"]["applicable"] is True
+    assert created["created_job_ids"]
 
 
 def test_hard_case_fails_and_is_reported(tmp_path):
@@ -102,7 +112,26 @@ def test_not_found_error_is_graded_from_real_outcome():
     result = rec["trace"]["tool_calls"][0]["result"]
     assert result["ok"] is False
     assert result["error"]["code"] == "NOT_FOUND"
-    assert rec["passed"] is True
+
+
+def test_false_success_claim_on_error_is_caught():
+    # The heuristic model says "Cancelled task X" though the delete returned
+    # NOT_FOUND — a false success claim, which must fail the case.
+    rec = _run_one("error_not_found_020")
+    assert rec["passed"] is False
+    failed = {g["name"] for g in rec["graders"] if g["applicable"] and not g["passed"]}
+    assert "no_false_success_claim" in failed
+
+
+def test_no_false_success_claim_passes_when_failure_acknowledged():
+    from evals.graders import grade_case
+    case = {"id": "x", "expected": {"tool": "task_delete_v1",
+            "error": {"code": "NOT_FOUND"}}, "grading": {"requires_tool_call": True}}
+    calls = [{"name": "task_delete_v1", "arguments": {"user_id": "u", "job_id": "job_x"},
+              "result": {"ok": False, "error": {"code": "NOT_FOUND", "field": "job_id"}}}]
+    g = next(x for x in grade_case(case, calls, "I couldn't find that task.")
+             if x["name"] == "no_false_success_claim")
+    assert g["passed"] is True
 
 
 # --- graders catch a bad model --------------------------------------------

@@ -18,6 +18,7 @@ import argparse
 import json
 import os
 from datetime import datetime
+from pathlib import Path
 
 from evals.executor import (
     EvalEnv,
@@ -29,6 +30,7 @@ from evals.executor import (
     unpin_clock,
 )
 from evals.graders import failure_reason, grade_case, overall
+from evals.judge import Judge, make_judge
 from evals.models import make_model
 from evals.prompts import system_prompt
 from evals.report import write_reports
@@ -36,7 +38,10 @@ from evals.report import write_reports
 
 def load_dataset(path: str) -> list[dict]:
     cases = []
-    with open(path) as f:
+    dataset_path = Path(path)
+    if not dataset_path.exists() and path.startswith("evals/"):
+        dataset_path = Path(__file__).resolve().parents[1] / path
+    with open(dataset_path) as f:
         for line in f:
             line = line.strip()
             if line:
@@ -61,7 +66,7 @@ def _execute_tool_calls(env: EvalEnv, tool_calls: list[dict]) -> tuple[list[dict
     return executed, trace_ids
 
 
-def run_case(model, case: dict, prompt_version: str) -> dict:
+def run_case(model, case: dict, prompt_version: str, judge: Judge | None = None) -> dict:
     env = EvalEnv()
     try:
         pin_clock(case["now"])
@@ -75,20 +80,30 @@ def run_case(model, case: dict, prompt_version: str) -> dict:
         context = {"user_id": user_id, **case.get("context", {})}
         resp = model.run(prompt, now_dt, context)
         executed, trace_ids = _execute_tool_calls(env, resp.tool_calls)
+        resp = model.finalize(prompt, now_dt, context, resp, executed)
 
         graders = grade_case(case, executed, resp.final_answer)
         passed, score = overall(graders)
+        llm_judge = _judge_case(judge, case, expected, executed, resp.final_answer, passed)
 
         primary = executed[0] if executed else None
+        ids = _extract_ids(executed)
         trace = {
             "case_id": case["id"],
             "model": model.name,
             "prompt_version": prompt_version,
+            "tool_schema_version": "scheduler_tools_v1",
             "prompt": prompt,
             "now": case["now"],
             "tool_calls": executed,
+            "created_job_ids": ids["job_ids"],
+            "created_run_ids": ids["run_ids"],
             "scheduler_trace_ids": trace_ids,
             "final_answer": resp.final_answer,
+            "deterministic_graders": graders,
+            "llm_judge": llm_judge,
+            "trace_track": bool(case.get("grading", {}).get("trace_track")),
+            "safety_case": bool(case.get("grading", {}).get("safety_case")),
             "usage": resp.usage,
             "latency_ms": resp.latency_ms,
         }
@@ -114,6 +129,12 @@ def run_case(model, case: dict, prompt_version: str) -> dict:
             "input_tokens": resp.usage.get("input_tokens", 0),
             "output_tokens": resp.usage.get("output_tokens", 0),
             "failure_reason": failure_reason(graders),
+            # Blank when the judge did not actually run (e.g. safety cases), so
+            # a non-applicable row is not misread as "judge passed".
+            "llm_judge_passed": llm_judge.get("passed") if llm_judge.get("applicable") else "",
+            "llm_judge_score": llm_judge.get("score") if llm_judge.get("applicable") else "",
+            "trace_track": bool(case.get("grading", {}).get("trace_track")),
+            "safety_case": bool(case.get("grading", {}).get("safety_case")),
             "expected_args": {k: expected[k] for k in
                               ("action", "type", "time", "schedule", "timezone")
                               if k in expected},
@@ -123,14 +144,71 @@ def run_case(model, case: dict, prompt_version: str) -> dict:
         env.dispose()
 
 
+def _judge_case(
+    judge: Judge | None,
+    case: dict,
+    expected: dict,
+    executed: list[dict],
+    final_answer: str,
+    deterministic_passed: bool,
+) -> dict:
+    if not case.get("grading", {}).get("use_llm_judge"):
+        return {
+            "name": "llm_final_answer_judge",
+            "passed": True,
+            "score": 1.0,
+            "reason": "Judge not configured for this case.",
+            "applicable": False,
+        }
+    judge = judge or make_judge("local")
+    return judge.grade(
+        {
+            "case_id": case["id"],
+            "prompt": case["prompt"],
+            "expected": expected,
+            "actual_tool_calls": [
+                {"name": tc["name"], "arguments": tc.get("arguments", {})}
+                for tc in executed
+            ],
+            "tool_results": [tc.get("result", {}) for tc in executed],
+            "final_answer": final_answer,
+            "deterministic_passed": deterministic_passed,
+        }
+    )
+
+
+def _extract_ids(executed: list[dict]) -> dict[str, list[str]]:
+    job_ids: list[str] = []
+    run_ids: list[str] = []
+    for tc in executed:
+        result = tc.get("result", {})
+        if not isinstance(result, dict):
+            continue
+        job = result.get("job")
+        if isinstance(job, dict) and job.get("job_id"):
+            job_ids.append(job["job_id"])
+        next_run = result.get("next_run")
+        if isinstance(next_run, dict) and next_run.get("run_id"):
+            run_ids.append(next_run["run_id"])
+        runs = result.get("runs", [])
+        if not isinstance(runs, list):
+            runs = []
+        for run in runs:
+            if isinstance(run, dict) and run.get("run_id"):
+                run_ids.append(run["run_id"])
+    return {"job_ids": job_ids, "run_ids": run_ids}
+
+
 def run_eval(dataset_path: str, model_spec: str, prompt_version: str,
-             out_dir: str) -> dict:
+             out_dir: str, judge_spec: str = "local") -> dict:
     cases = load_dataset(dataset_path)
     model = make_model(model_spec, system_prompt(prompt_version))
-    records = [run_case(model, case, prompt_version) for case in cases]
+    judge = make_judge(judge_spec)
+    records = [run_case(model, case, prompt_version, judge) for case in cases]
     run_meta = {
         "dataset": dataset_path,
         "model": model.name,
+        "judge": judge.name,
         "prompt_version": prompt_version,
         "cases": len(cases),
     }
@@ -142,6 +220,8 @@ def main() -> None:
     p.add_argument("--dataset", default="evals/datasets/scheduler_tool_use_v1.jsonl")
     p.add_argument("--model", default="local",
                    help="'local' or 'openai:<model>' (needs OPENAI_API_KEY).")
+    p.add_argument("--judge-model", default="local",
+                   help="'none', 'local', or 'openai:<model>' for final-answer judging.")
     p.add_argument("--prompt-version", default="spec03",
                    choices=["baseline", "spec03", "short", "long"])
     p.add_argument("--out", default=None, help="Output run directory.")
@@ -150,7 +230,7 @@ def main() -> None:
     out_dir = args.out or os.path.join(
         "evals", "results", "runs",
         f"{args.model.replace(':', '-')}-{datetime.now().strftime('%Y%m%d-%H%M%S')}")
-    summary = run_eval(args.dataset, args.model, args.prompt_version, out_dir)
+    summary = run_eval(args.dataset, args.model, args.prompt_version, out_dir, args.judge_model)
     print(f"Ran {summary['total']} cases | pass_rate={summary['pass_rate']} "
           f"| mean_score={summary['mean_score']}")
     print(f"Reports written to {out_dir}")

@@ -21,11 +21,12 @@ real dispatch result. It never grades an exact tool-call *sequence*.
 
 | Path | Purpose |
 | --- | --- |
-| `datasets/scheduler_tool_use_v1.jsonl` | 22 hand-written cases across every category |
+| `datasets/scheduler_tool_use_v1.jsonl` | 40 hand-written cases: 30 scheduler cases + 10 safety cases |
 | `executor.py` | isolated eval DB + clock pin; runs tool calls through the real MCP `dispatch` |
 | `tool_schemas.py` | MCP public schemas → OpenAI Responses tool defs |
 | `models.py` | `HeuristicModel` (default, no key) and optional `OpenAIModel` |
-| `graders.py` | 11 deterministic graders + overall verdict |
+| `graders.py` | deterministic tool/outcome/safety graders + overall verdict |
+| `judge.py` | local offline final-answer judge + optional OpenAI LLM-as-judge |
 | `report.py` | writes `summary.json`, `results.csv`, `traces.jsonl`, `openai_evals_payload.jsonl` |
 | `run_openai_eval.py` | CLI / `run_eval()` orchestrator |
 | `prompts.py` | prompt variants for A/B comparison |
@@ -35,19 +36,22 @@ real dispatch result. It never grades an exact tool-call *sequence*.
 ```bash
 cd chatGPT-task
 python -m evals.run_openai_eval --model local --prompt-version spec03 \
-  --out evals/results/runs/local-demo
+  --judge-model local --out evals/results/runs/local-demo
 ```
 
 - `--model local` (default) uses the deterministic `HeuristicModel` — no API key,
   fully offline, and *genuinely fallible* so the report shows a real pass rate.
 - `--model openai:<model>` calls the real Responses API (needs `OPENAI_API_KEY`)
   with the same tool schemas.
+- `--judge-model local` gives an offline final-answer quality score. Use
+  `--judge-model openai:<model>` for a real LLM-as-judge pass.
 - `--prompt-version` ∈ `baseline | spec03 | short | long`.
 
 Outputs land in the `--out` run directory:
 
 - `results.csv` — flat rows for pandas / Spec 08 analysis.
-- `traces.jsonl` — full model traces (tool calls, results, `scheduler_trace_ids`).
+- `traces.jsonl` — full model traces (tool calls, results, created
+  `job_id`/`run_id` values, `scheduler_trace_ids`, judge output).
 - `summary.json` — pass rate by category and by grader.
 - `openai_evals_payload.jsonl` — flattened items for a hosted OpenAI LLM-judge
   pass over final-answer quality (wired, run separately when a key is available).
@@ -60,8 +64,10 @@ Stateful categories (`get`/`modify`/`delete`/`read_runs`/`read_trace`) use a
 `seed` list of oracle calls run before the graded turn; `{{job_id}}` /
 `{{trace_id}}` placeholders in the prompt/expected are substituted from the seed.
 
-Positive **and** negative cases are included (ask for a missing timezone; decline
-out-of-scope; surface `NOT_FOUND`), per the article's balance guidance.
+Positive, negative, and safety cases are included (ask for a missing timezone;
+decline out-of-scope; surface `NOT_FOUND`; avoid admin/cross-user/secret
+requests). Exactly 10 scheduler cases set `grading.trace_track=true` for deeper
+trace inspection.
 
 ## Environment
 

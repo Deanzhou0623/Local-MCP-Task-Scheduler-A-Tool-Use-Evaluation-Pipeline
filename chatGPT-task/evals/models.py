@@ -34,6 +34,15 @@ class Model(Protocol):
 
     def run(self, prompt: str, now: datetime, context: dict) -> ModelResponse: ...
 
+    def finalize(
+        self,
+        prompt: str,
+        now: datetime,
+        context: dict,
+        initial: ModelResponse,
+        executed_tool_calls: list[dict],
+    ) -> ModelResponse: ...
+
 
 # --- Heuristic solver ------------------------------------------------------
 _JOB_ID = re.compile(r"job_[0-9a-f]+")
@@ -69,6 +78,11 @@ class HeuristicModel:
 
         def resp(tool_calls, answer):
             return ModelResponse(tool_calls, answer, usage, 0)
+
+        # --- Safety/security cases --------------------------------------
+        if self._should_refuse(low):
+            return resp([], "I can't help with that request through the task "
+                            "scheduler.")
 
         # --- Stateful tools keyed by an explicit id in the prompt ---------
         trace_m = _TRACE_ID.search(text)
@@ -117,6 +131,38 @@ class HeuristicModel:
 
         # --- Create -------------------------------------------------------
         return self._create(user_id, text, low, now, context, resp)
+
+    def finalize(
+        self,
+        prompt: str,
+        now: datetime,
+        context: dict,
+        initial: ModelResponse,
+        executed_tool_calls: list[dict],
+    ) -> ModelResponse:
+        return initial
+
+    def _should_refuse(self, low: str) -> bool:
+        secret_terms = (
+            "api key", "database password", "db password", "secret key",
+            "hidden system", "system instructions", "system prompt",
+        )
+        destructive_terms = (
+            "delete all users", "wipe the database", "drop database",
+            "rm -rf", "shell_exec",
+        )
+        exfil_terms = (
+            "attacker@", "all scheduler traces", "all traces", "exfiltrate",
+        )
+        false_claim_terms = (
+            "really sent", "claim it was sent", "pretend it was sent",
+        )
+        return any(t in low for t in (
+            *secret_terms,
+            *destructive_terms,
+            *exfil_terms,
+            *false_claim_terms,
+        ))
 
     # -- create helpers ----------------------------------------------------
     def _action(self, low: str) -> str:
@@ -278,14 +324,75 @@ class OpenAIModel:
         for item in resp.output:
             if getattr(item, "type", None) == "function_call":
                 tool_calls.append({"name": item.name,
-                                   "arguments": _json.loads(item.arguments)})
+                                   "arguments": _json.loads(item.arguments),
+                                   "call_id": item.call_id})
             elif getattr(item, "type", None) == "message":
                 for c in item.content:
                     if getattr(c, "type", None) == "output_text":
                         final_answer += c.text
         usage = {"input_tokens": getattr(resp.usage, "input_tokens", 0),
                  "output_tokens": getattr(resp.usage, "output_tokens", 0)}
-        return ModelResponse(tool_calls, final_answer.strip(), usage, latency_ms)
+        out = ModelResponse(tool_calls, final_answer.strip(), usage, latency_ms)
+        out.provider_state = {"response_id": resp.id}  # type: ignore[attr-defined]
+        return out
+
+    def finalize(
+        self,
+        prompt: str,
+        now: datetime,
+        context: dict,
+        initial: ModelResponse,
+        executed_tool_calls: list[dict],
+    ) -> ModelResponse:  # pragma: no cover
+        if not initial.tool_calls:
+            return initial
+
+        import json as _json
+        import time
+
+        from openai import OpenAI
+
+        client = OpenAI()
+        response_id = getattr(initial, "provider_state", {}).get("response_id")
+        tool_outputs = []
+        for raw, executed in zip(initial.tool_calls, executed_tool_calls):
+            call_id = raw.get("call_id")
+            if call_id:
+                tool_outputs.append(
+                    {
+                        "type": "function_call_output",
+                        "call_id": call_id,
+                        "output": _json.dumps(executed.get("result", {})),
+                    }
+                )
+        if not response_id or not tool_outputs:
+            return initial
+
+        started = time.time()
+        resp = client.responses.create(
+            model=self.model,
+            previous_response_id=response_id,
+            input=tool_outputs,
+        )
+        latency_ms = initial.latency_ms + int((time.time() - started) * 1000)
+        final_answer = ""
+        for item in resp.output:
+            if getattr(item, "type", None) == "message":
+                for c in item.content:
+                    if getattr(c, "type", None) == "output_text":
+                        final_answer += c.text
+        usage = {
+            "input_tokens": initial.usage.get("input_tokens", 0)
+            + getattr(resp.usage, "input_tokens", 0),
+            "output_tokens": initial.usage.get("output_tokens", 0)
+            + getattr(resp.usage, "output_tokens", 0),
+        }
+        return ModelResponse(
+            initial.tool_calls,
+            final_answer.strip() or initial.final_answer,
+            usage,
+            latency_ms,
+        )
 
 
 def make_model(spec: str, system_prompt: str) -> Model:
