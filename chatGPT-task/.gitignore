@@ -9,3 +9,6 @@ CLAUDE.md
 # Eval run outputs (keep the directory, ignore generated runs)
 evals/results/runs/*
 !evals/results/runs/.gitkeep
+
+# Spec 08 analysis outputs (generated)
+evals/results/analysis/
