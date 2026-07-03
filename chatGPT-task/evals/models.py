@@ -166,6 +166,8 @@ class HeuristicModel:
 
     # -- create helpers ----------------------------------------------------
     def _action(self, low: str) -> str:
+        if "email" in low:
+            return "send_email"
         # Reminder intent wins over verbs inside the reminder text
         # ("remind me to review ..." is a reminder, not review_pr).
         if "remind" in low:
@@ -176,8 +178,6 @@ class HeuristicModel:
             return "generate_report"
         if "review" in low or "pull request" in low or re.search(r"\bpr\b", low):
             return "review_pr"
-        if "email" in low:
-            return "send_email"
         if "news" in low:
             return "fetch_news"
         return "send_reminder"
@@ -252,6 +252,12 @@ class HeuristicModel:
             tz = ZoneInfo(tz_name)
             local_now = now.astimezone(tz)
             target = local_now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+            if target <= local_now and "today" in low:
+                return resp(
+                    [],
+                    f"{target.strftime('%-I:%M %p')} today has already passed. "
+                    "Please choose a future time.",
+                )
             if "tomorrow" in low or (target <= local_now and "today" not in low):
                 target += timedelta(days=1)
             args["time"] = target.isoformat()
@@ -260,6 +266,20 @@ class HeuristicModel:
 
         if action == "send_reminder":
             args["action_params"] = {"text": self._reminder_text(text)}
+        elif action == "send_email":
+            reminder = self._reminder_text(text)
+            subject = (
+                f"Reminder: {reminder}" if reminder else "Reminder"
+            )
+            body = (
+                reminder[:1].upper() + reminder[1:] + "."
+                if reminder else "Reminder."
+            )
+            args["action_params"] = {
+                "to": context.get("email", "1182160314@qq.com"),
+                "subject": subject,
+                "body": body,
+            }
 
         return resp([{"name": "task_create_v1", "arguments": args}],
                     f"Scheduled a {args['type'].replace('_', '-')} "
@@ -395,10 +415,187 @@ class OpenAIModel:
         )
 
 
+def _provider_system(system_prompt: str, now: datetime, context: dict) -> str:
+    tz = context.get("timezone", "UTC")
+    return (f"{system_prompt}\nCurrent time: {now.isoformat()}. "
+            f"User id: {context.get('user_id', 'eval-user')}. User timezone: {tz}.")
+
+
+# --- Anthropic model (optional) -------------------------------------------
+class AnthropicModel:
+    """Real Anthropic Messages-API model with tool use. Requires ``ANTHROPIC_API_KEY``."""
+
+    def __init__(self, model: str, system_prompt: str) -> None:
+        self.name = model
+        self.model = model
+        self.system_prompt = system_prompt
+
+    @staticmethod
+    def _parse(resp) -> tuple[list[dict], str, dict]:
+        """Normalize a Messages response into (tool_calls, final_answer, usage)."""
+        tool_calls, text = [], []
+        for block in resp.content:
+            btype = getattr(block, "type", None)
+            if btype == "tool_use":
+                tool_calls.append({"name": block.name,
+                                   "arguments": dict(block.input),
+                                   "call_id": block.id})
+            elif btype == "text":
+                text.append(block.text)
+        usage = {"input_tokens": getattr(resp.usage, "input_tokens", 0),
+                 "output_tokens": getattr(resp.usage, "output_tokens", 0)}
+        return tool_calls, "".join(text).strip(), usage
+
+    def run(self, prompt: str, now: datetime, context: dict) -> ModelResponse:  # pragma: no cover
+        import time
+
+        from anthropic import Anthropic
+
+        from evals.tool_schemas import anthropic_tool_defs
+
+        system = _provider_system(self.system_prompt, now, context)
+        started = time.time()
+        resp = Anthropic().messages.create(
+            model=self.model, max_tokens=1024, system=system,
+            messages=[{"role": "user", "content": prompt}],
+            tools=anthropic_tool_defs(),
+        )
+        latency_ms = int((time.time() - started) * 1000)
+        tool_calls, final_answer, usage = self._parse(resp)
+        out = ModelResponse(tool_calls, final_answer, usage, latency_ms)
+        out.provider_state = {  # type: ignore[attr-defined]
+            "assistant_content": resp.content, "system": system, "prompt": prompt}
+        return out
+
+    def finalize(self, prompt, now, context, initial, executed_tool_calls):  # pragma: no cover
+        if not initial.tool_calls:
+            return initial
+        import json as _json
+        import time
+
+        from anthropic import Anthropic
+
+        from evals.tool_schemas import anthropic_tool_defs
+
+        state = getattr(initial, "provider_state", {})
+        results = []
+        for raw, ex in zip(initial.tool_calls, executed_tool_calls):
+            if raw.get("call_id"):
+                results.append({"type": "tool_result", "tool_use_id": raw["call_id"],
+                                "content": _json.dumps(ex.get("result", {}))})
+        if not state.get("assistant_content") or not results:
+            return initial
+        started = time.time()
+        resp = Anthropic().messages.create(
+            model=self.model, max_tokens=1024, system=state["system"],
+            messages=[{"role": "user", "content": state["prompt"]},
+                      {"role": "assistant", "content": state["assistant_content"]},
+                      {"role": "user", "content": results}],
+            tools=anthropic_tool_defs(),
+        )
+        latency_ms = initial.latency_ms + int((time.time() - started) * 1000)
+        _, final_answer, u2 = self._parse(resp)
+        usage = {"input_tokens": initial.usage.get("input_tokens", 0) + u2["input_tokens"],
+                 "output_tokens": initial.usage.get("output_tokens", 0) + u2["output_tokens"]}
+        return ModelResponse(initial.tool_calls, final_answer or initial.final_answer,
+                             usage, latency_ms)
+
+
+# --- Gemini model (optional) ----------------------------------------------
+class GeminiModel:
+    """Real Google Gemini model with function calling. Requires ``GOOGLE_API_KEY``."""
+
+    def __init__(self, model: str, system_prompt: str) -> None:
+        self.name = model
+        self.model = model
+        self.system_prompt = system_prompt
+
+    @staticmethod
+    def _parse(resp) -> tuple[list[dict], str, dict]:
+        """Normalize a generate_content response into (tool_calls, answer, usage)."""
+        tool_calls, text = [], []
+        parts = resp.candidates[0].content.parts if resp.candidates else []
+        for part in parts:
+            fc = getattr(part, "function_call", None)
+            if fc is not None:
+                tool_calls.append({"name": fc.name, "arguments": dict(fc.args or {})})
+            elif getattr(part, "text", None):
+                text.append(part.text)
+        um = getattr(resp, "usage_metadata", None)
+        usage = {"input_tokens": getattr(um, "prompt_token_count", 0) if um else 0,
+                 "output_tokens": getattr(um, "candidates_token_count", 0) if um else 0}
+        return tool_calls, "".join(text).strip(), usage
+
+    def run(self, prompt: str, now: datetime, context: dict) -> ModelResponse:  # pragma: no cover
+        import time
+
+        import os
+
+        from google import genai
+        from google.genai import types
+
+        from evals.tool_schemas import gemini_tool_defs
+
+        client = genai.Client(
+            api_key=os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY"))
+        config = types.GenerateContentConfig(
+            system_instruction=_provider_system(self.system_prompt, now, context),
+            tools=[types.Tool(function_declarations=gemini_tool_defs())],
+        )
+        started = time.time()
+        resp = client.models.generate_content(model=self.model, contents=prompt, config=config)
+        latency_ms = int((time.time() - started) * 1000)
+        tool_calls, final_answer, usage = self._parse(resp)
+        out = ModelResponse(tool_calls, final_answer, usage, latency_ms)
+        out.provider_state = {  # type: ignore[attr-defined]
+            "prompt": prompt, "config": config,
+            "candidate_content": resp.candidates[0].content if resp.candidates else None}
+        return out
+
+    def finalize(self, prompt, now, context, initial, executed_tool_calls):  # pragma: no cover
+        if not initial.tool_calls:
+            return initial
+        import os
+        import time
+
+        from google import genai
+        from google.genai import types
+
+        state = getattr(initial, "provider_state", {})
+        if state.get("candidate_content") is None:
+            return initial
+        responses = [
+            types.Part.from_function_response(
+                name=raw["name"], response={"result": ex.get("result", {})})
+            for raw, ex in zip(initial.tool_calls, executed_tool_calls)
+        ]
+        contents = [state["prompt"], state["candidate_content"],
+                    types.Content(role="user", parts=responses)]
+        started = time.time()
+        client = genai.Client(
+            api_key=os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY"))
+        resp = client.models.generate_content(
+            model=self.model, contents=contents, config=state["config"])
+        latency_ms = initial.latency_ms + int((time.time() - started) * 1000)
+        _, final_answer, u2 = self._parse(resp)
+        usage = {"input_tokens": initial.usage.get("input_tokens", 0) + u2["input_tokens"],
+                 "output_tokens": initial.usage.get("output_tokens", 0) + u2["output_tokens"]}
+        return ModelResponse(initial.tool_calls, final_answer or initial.final_answer,
+                             usage, latency_ms)
+
+
 def make_model(spec: str, system_prompt: str) -> Model:
-    """Build a model from a spec string: ``local`` or ``openai:<model>``."""
-    if spec == "local" or spec == "local-heuristic":
+    """Build a model from a spec: ``local``, ``openai:<id>``, ``anthropic:<id>``,
+    or ``gemini:<id>``."""
+    if spec in ("local", "local-heuristic"):
         return HeuristicModel()
-    if spec.startswith("openai:"):
-        return OpenAIModel(spec.split(":", 1)[1], system_prompt)
-    raise ValueError(f"Unknown model spec {spec!r} (use 'local' or 'openai:<model>').")
+    provider, _, model_id = spec.partition(":")
+    if provider == "openai" and model_id:
+        return OpenAIModel(model_id, system_prompt)
+    if provider == "anthropic" and model_id:
+        return AnthropicModel(model_id, system_prompt)
+    if provider in ("gemini", "google") and model_id:
+        return GeminiModel(model_id, system_prompt)
+    raise ValueError(
+        f"Unknown model spec {spec!r} "
+        "(use 'local', 'openai:<id>', 'anthropic:<id>', or 'gemini:<id>').")

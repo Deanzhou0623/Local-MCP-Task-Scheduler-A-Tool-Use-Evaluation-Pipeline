@@ -96,14 +96,23 @@ def test_heuristic_resolves_relative_time_and_timezone():
     rec = _run_one("create_one_time_reminder_vancouver_004")
     call = rec["trace"]["tool_calls"][0]
     assert call["name"] == "task_create_v1"
-    assert call["arguments"]["time"] == "2026-06-15T16:30:00-07:00"
+    assert call["arguments"]["action"] == "send_email"
+    assert call["arguments"]["time"] == "2026-06-15T20:30:00-07:00"
     assert call["arguments"]["timezone"] == "America/Vancouver"
+    assert call["arguments"]["action_params"]["to"] == "1182160314@qq.com"
     assert rec["passed"] is True
 
 
 def test_heuristic_asks_for_missing_timezone_instead_of_guessing():
     rec = _run_one("clarify_missing_timezone_018")
     assert rec["trace"]["tool_calls"] == []
+    assert rec["passed"] is True
+
+
+def test_heuristic_rejects_today_time_that_already_passed():
+    rec = _run_one("past_time_email_reminder_011")
+    assert rec["trace"]["tool_calls"] == []
+    assert "already passed" in rec["trace"]["final_answer"].lower()
     assert rec["passed"] is True
 
 
@@ -160,5 +169,6 @@ def test_final_answer_overclaim_is_flagged():
 
 def test_make_model_rejects_unknown_spec():
     import pytest
+    # gemini/anthropic/openai are now valid providers; use an unsupported one.
     with pytest.raises(ValueError):
-        make_model("gemini:pro", "sys")
+        make_model("mistral:pro", "sys")

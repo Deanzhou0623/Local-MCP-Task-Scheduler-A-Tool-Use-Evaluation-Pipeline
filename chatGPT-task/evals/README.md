@@ -29,6 +29,7 @@ real dispatch result. It never grades an exact tool-call *sequence*.
 | `judge.py` | local offline final-answer judge + optional OpenAI LLM-as-judge |
 | `report.py` | writes `summary.json`, `results.csv`, `traces.jsonl`, `openai_evals_payload.jsonl` |
 | `run_openai_eval.py` | CLI / `run_eval()` orchestrator |
+| `analyze_results.py` | Spec 08 offline comparison, failure clustering, leaderboard, recommendations |
 | `prompts.py` | prompt variants for A/B comparison |
 
 ## Run
@@ -41,11 +42,28 @@ python -m evals.run_openai_eval --model local --prompt-version spec03 \
 
 - `--model local` (default) uses the deterministic `HeuristicModel` — no API key,
   fully offline, and *genuinely fallible* so the report shows a real pass rate.
-- `--model openai:<model>` calls the real Responses API (needs `OPENAI_API_KEY`)
-  with the same tool schemas.
+- `--model <provider>:<id>` calls a real provider with the same tool schemas:
+  `openai:<id>` (`OPENAI_API_KEY`), `anthropic:<id>` (`ANTHROPIC_API_KEY`),
+  `gemini:<id>` (`GOOGLE_API_KEY`). No key → use `local`.
 - `--judge-model local` gives an offline final-answer quality score. Use
   `--judge-model openai:<model>` for a real LLM-as-judge pass.
 - `--prompt-version` ∈ `baseline | spec03 | short | long`.
+
+### Compare three real models
+
+Run the same dataset once per provider into its own run folder, then let Spec 08
+compare them. The scheduler stays local and mock — only the model *decision* comes
+from the API; tool execution and grading are local.
+
+```bash
+python -m evals.run_openai_eval --model openai:<id>    --out evals/results/runs/openai
+python -m evals.run_openai_eval --model anthropic:<id> --out evals/results/runs/anthropic
+python -m evals.run_openai_eval --model gemini:<id>    --out evals/results/runs/gemini
+# then: python -m evals.analyze_results --runs evals/results/runs/{openai,anthropic,gemini}
+```
+
+Model ids are not hardcoded — pass whatever current id you want. Live runs cost
+money and need the matching key; tests/CI never call a provider (local fallback).
 
 Outputs land in the `--out` run directory:
 
@@ -55,6 +73,38 @@ Outputs land in the `--out` run directory:
 - `summary.json` — pass rate by category and by grader.
 - `openai_evals_payload.jsonl` — flattened items for a hosted OpenAI LLM-judge
   pass over final-answer quality (wired, run separately when a key is available).
+
+## Analyze runs (Spec 08)
+
+After one or more Spec07 runs exist, analyze them offline:
+
+```bash
+cd chatGPT-task
+python -m evals.analyze_results \
+  --runs evals/results/runs/local-demo \
+  --out evals/results/analysis/local-demo
+```
+
+For model comparison, pass multiple run folders:
+
+```bash
+python -m evals.analyze_results \
+  --runs evals/results/runs/openai-gpt \
+         evals/results/runs/anthropic-sonnet \
+         evals/results/runs/google-gemini \
+  --out evals/results/analysis/compare-001
+```
+
+Outputs:
+
+- `analysis_summary.json` — normalized run metrics and top failure types.
+- `model_leaderboard.csv` — weighted comparison across runs/models.
+- `category_breakdown.csv` and `grader_breakdown.csv` — weak areas by category
+  and deterministic grader.
+- `failure_clusters.json` / `.csv` — grouped failure modes with case ids.
+- `trace_track_report.json` — job/run/trace-id coverage for trace-track cases.
+- `recommendations.md` — concise next changes to make in prompts, schemas, or
+  dataset cases.
 
 ## Dataset format
 
@@ -75,7 +125,8 @@ trace inspection.
 OPENAI_API_KEY=      # only for --model openai:<model> and the hosted judge
 ```
 
-## Not in scope (Spec 08)
+## Provider comparison
 
-Failure clustering, prompt/schema A/B comparison across runs, and cross-provider
-(Claude/Gemini) comparisons.
+The analyzer does not call provider APIs. Run providers through Spec07 first
+(`openai:<model>` now, Claude/Gemini adapters later), then compare the output
+folders with `evals.analyze_results`.

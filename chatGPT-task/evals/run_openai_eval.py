@@ -201,6 +201,11 @@ def _extract_ids(executed: list[dict]) -> dict[str, list[str]]:
 
 def run_eval(dataset_path: str, model_spec: str, prompt_version: str,
              out_dir: str, judge_spec: str = "local") -> dict:
+    # Load provider API keys from .env for live runs (no-op if absent; the local
+    # model needs no key).
+    from dotenv import load_dotenv
+
+    load_dotenv()
     cases = load_dataset(dataset_path)
     model = make_model(model_spec, system_prompt(prompt_version))
     judge = make_judge(judge_spec)
