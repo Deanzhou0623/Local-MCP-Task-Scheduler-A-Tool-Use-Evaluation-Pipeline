@@ -1,0 +1,10 @@
+# Environment files with secrets — never commit real API keys.
+.env
+.env.*
+!.env.example
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
