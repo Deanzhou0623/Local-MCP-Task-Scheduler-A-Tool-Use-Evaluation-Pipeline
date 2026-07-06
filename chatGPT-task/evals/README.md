@@ -23,13 +23,15 @@ real dispatch result. It never grades an exact tool-call *sequence*.
 | --- | --- |
 | `datasets/scheduler_tool_use_v1.jsonl` | 40 hand-written cases: 30 scheduler cases + 10 safety cases |
 | `executor.py` | isolated eval DB + clock pin; runs tool calls through the real MCP `dispatch` |
-| `tool_schemas.py` | MCP public schemas → OpenAI Responses tool defs |
-| `models.py` | `HeuristicModel` (default, no key) and optional `OpenAIModel` |
+| `tool_schemas.py` | MCP public schemas → OpenAI / Anthropic / Gemini tool defs |
+| `models.py` | `HeuristicModel` (default, no key) + optional `OpenAIModel` / `AnthropicModel` / `GeminiModel` |
 | `graders.py` | deterministic tool/outcome/safety graders + overall verdict |
-| `judge.py` | local offline final-answer judge + optional OpenAI LLM-as-judge |
+| `judge.py` | local offline judge + optional OpenAI / Anthropic / Gemini LLM-as-judge |
 | `report.py` | writes `summary.json`, `results.csv`, `traces.jsonl`, `openai_evals_payload.jsonl` |
 | `run_openai_eval.py` | CLI / `run_eval()` orchestrator |
-| `analyze_results.py` | Spec 08 offline comparison, failure clustering, leaderboard, recommendations |
+| `rejudge.py` | re-run the LLM judge over existing run folders (swap/repair the judge, no model re-run) |
+| `analyze_results.py` | Spec 08 offline comparison, failure clustering, leaderboard, machine-readable outputs |
+| `make_reports.py` | generate the 4 human reports (one per model + a final comparison with diagrams/conclusion) |
 | `prompts.py` | prompt variants for A/B comparison |
 
 ## Run
@@ -121,9 +123,30 @@ Outputs:
 - `category_breakdown.csv` and `grader_breakdown.csv` — weak areas by category
   and deterministic grader.
 - `failure_clusters.json` / `.csv` — grouped failure modes with case ids.
+- `all_failures.jsonl` / `.csv` — every failing case with full detail.
 - `trace_track_report.json` — job/run/trace-id coverage for trace-track cases.
 - `recommendations.md` — concise next changes to make in prompts, schemas, or
   dataset cases.
+
+### Human reports (the deliverable)
+
+`analyze_results` writes the machine-readable analysis above. To get the concise
+**4 markdown reports** — one per model plus a final comparison with diagrams, a
+conclusion, and "worth exploring" (no recommendations) — run `make_reports`
+against the same run + analysis folders:
+
+```bash
+python -m evals.make_reports \
+  --runs evals/results/runs/openai evals/results/runs/anthropic evals/results/runs/gemini \
+  --analysis evals/results/analysis/flagship \
+  --out evals/results/reports
+```
+
+This produces `report-<model>.md` per model (pass rate, category/grader
+breakdown, trace-track, and per-case failure detail) and
+`report-final-report.md` (leaderboard + ASCII diagrams + commons/differences
++ conclusion). Swap the LLM judge on an existing run without re-running the
+models with `python -m evals.rejudge --runs <dir> --judge-model anthropic:<id>`.
 
 ## Dataset format
 
@@ -145,12 +168,21 @@ test address `test@example.com` (RFC 2606) in both the prompt and the expected
 
 ## Environment
 
+Only needed for real-provider runs / judges; copy `.env.example` → `.env`.
+
 ```txt
-OPENAI_API_KEY=      # only for --model openai:<model> and the hosted judge
+OPENAI_API_KEY=      # --model/--judge-model openai:<id>
+ANTHROPIC_API_KEY=   # --model/--judge-model anthropic:<id>
+GEMINI_API_KEY=      # --model/--judge-model gemini:<id>  (or GOOGLE_API_KEY)
 ```
+
+With no key set, everything falls back to the local model/judge, so tests/CI
+stay free and green.
 
 ## Provider comparison
 
-The analyzer does not call provider APIs. Run providers through Spec07 first
-(`openai:<model>` now, Claude/Gemini adapters later), then compare the output
-folders with `evals.analyze_results`.
+`run_openai_eval` supports `openai:<id>`, `anthropic:<id>`, and `gemini:<id>`
+behind one interface (all with real multi-turn tool use). The analyzer and
+report generator never call provider APIs — run each provider through Spec07
+first, then compare the output folders with `analyze_results` + `make_reports`.
+Use **one fixed `--judge-model`** across runs so the judge is consistent.
