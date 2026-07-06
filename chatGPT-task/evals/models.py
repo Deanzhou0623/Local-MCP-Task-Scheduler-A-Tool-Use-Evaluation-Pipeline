@@ -276,7 +276,7 @@ class HeuristicModel:
                 if reminder else "Reminder."
             )
             args["action_params"] = {
-                "to": context.get("email", "1182160314@qq.com"),
+                "to": context.get("email", "test@example.com"),
                 "subject": subject,
                 "body": body,
             }

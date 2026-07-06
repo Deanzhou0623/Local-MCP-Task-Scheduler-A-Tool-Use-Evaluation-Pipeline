@@ -99,7 +99,7 @@ def test_heuristic_resolves_relative_time_and_timezone():
     assert call["arguments"]["action"] == "send_email"
     assert call["arguments"]["time"] == "2026-06-15T20:30:00-07:00"
     assert call["arguments"]["timezone"] == "America/Vancouver"
-    assert call["arguments"]["action_params"]["to"] == "1182160314@qq.com"
+    assert call["arguments"]["action_params"]["to"] == "test@example.com"
     assert rec["passed"] is True
 
 

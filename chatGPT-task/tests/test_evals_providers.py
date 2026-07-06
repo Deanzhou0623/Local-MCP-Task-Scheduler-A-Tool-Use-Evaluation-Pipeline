@@ -113,3 +113,23 @@ def test_gemini_parse_handles_no_candidates():
     tool_calls, final, usage = GeminiModel._parse(resp)
     assert tool_calls == [] and final == ""
     assert usage == {"input_tokens": 0, "output_tokens": 0}
+
+
+# --- OpenAI judge robustness (fenced JSON + 0-100 score) -------------------
+def test_judge_extract_json_from_fence_and_prose():
+    import json
+
+    from evals.judge import _extract_json
+    assert json.loads(_extract_json('```json\n{"passed": true, "score": 1}\n```'))["passed"] is True
+    assert json.loads(_extract_json('Verdict: {"score": 0.5} thanks'))["score"] == 0.5
+    with pytest.raises(ValueError):
+        _extract_json("no json object here")
+
+
+def test_judge_normalize_score_handles_0_100_scale():
+    from evals.judge import _normalize_score
+    assert _normalize_score(100) == 1.0      # 0-100 scale -> 1.0
+    assert _normalize_score(85) == 0.85
+    assert _normalize_score(0.8) == 0.8      # already 0-1
+    assert _normalize_score(999) == 1.0      # clamp
+    assert _normalize_score("bad") == 0.0

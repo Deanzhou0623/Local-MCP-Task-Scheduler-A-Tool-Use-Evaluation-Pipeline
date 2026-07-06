@@ -122,8 +122,57 @@ def analyze_runs(run_dirs: list[str | Path], out_dir: str | Path) -> dict[str, A
     _write_json(out / "failure_clusters.json", clusters)
     _write_csv(out / "failure_clusters.csv", _cluster_csv_rows(clusters))
     _write_json(out / "trace_track_report.json", trace_report)
+    failures = _all_failures(runs)
+    _write_jsonl(out / "all_failures.jsonl", failures)
+    _write_csv(out / "all_failures.csv", [_failure_csv_row(f) for f in failures])
     _write_recommendations(out / "recommendations.md", leaderboard, clusters, recommendations)
+    analysis["failure_count"] = len(failures)
     return analysis
+
+
+def _all_failures(runs: list[RunArtifacts]) -> list[dict[str, Any]]:
+    """Every failing case across all runs, with full detail for review."""
+    out = []
+    for run in runs:
+        trace_by_case = {t["case_id"]: t for t in run.traces}
+        for row in run.rows:
+            if _bool(row["passed"]):
+                continue
+            trace = trace_by_case[row["case_id"]]
+            failed = [g["name"] for g in trace["deterministic_graders"]
+                      if g.get("applicable") and not g.get("passed")]
+            out.append({
+                "run_id": run.run_id,
+                "model": run.model,
+                "case_id": row["case_id"],
+                "category": row["category"],
+                "safety_case": _bool(row["safety_case"]),
+                "trace_track": _bool(row["trace_track"]),
+                "failed_graders": failed,
+                "expected_tool": row["expected_tool"],
+                "actual_tool": row["actual_tool"],
+                "expected_action": row["expected_action"],
+                "actual_action": row["actual_action"],
+                "expected_time": row["expected_time"],
+                "actual_time": row["actual_time"],
+                "error_code": row["error_code"],
+                "failure_reason": row["failure_reason"],
+                "prompt": trace["prompt"],
+                "final_answer": trace["final_answer"],
+                "tool_calls": trace["tool_calls"],
+            })
+    return out
+
+
+def _failure_csv_row(f: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "run_id": f["run_id"], "model": f["model"], "case_id": f["case_id"],
+        "category": f["category"], "safety_case": f["safety_case"],
+        "trace_track": f["trace_track"], "failed_graders": ",".join(f["failed_graders"]),
+        "expected_tool": f["expected_tool"], "actual_tool": f["actual_tool"],
+        "expected_time": f["expected_time"], "actual_time": f["actual_time"],
+        "error_code": f["error_code"], "failure_reason": f["failure_reason"],
+    }
 
 
 def load_run(path: Path) -> RunArtifacts:
@@ -549,6 +598,12 @@ def _row_by_id(run: RunArtifacts, case_id: str) -> dict[str, str]:
 def _write_json(path: Path, data: Any) -> None:
     with open(path, "w") as f:
         json.dump(data, f, indent=2)
+
+
+def _write_jsonl(path: Path, rows: list[dict[str, Any]]) -> None:
+    with open(path, "w") as f:
+        for row in rows:
+            f.write(json.dumps(row) + "\n")
 
 
 def _write_csv(path: Path, rows: list[dict[str, Any]]) -> None:

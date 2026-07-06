@@ -49,21 +49,40 @@ python -m evals.run_openai_eval --model local --prompt-version spec03 \
   `--judge-model openai:<model>` for a real LLM-as-judge pass.
 - `--prompt-version` ∈ `baseline | spec03 | short | long`.
 
-### Compare three real models
+### Recommended workflow (smoke cheap, then compare flagships)
 
-Run the same dataset once per provider into its own run folder, then let Spec 08
-compare them. The scheduler stays local and mock — only the model *decision* comes
-from the API; tool execution and grading are local.
+Live runs cost money, so **always smoke-test with the cheapest model of each
+provider first**, record the result, and confirm the pipeline + dataset are
+healthy before spending on flagship models.
+
+**Step 1 — cheap smoke** (a few cents; verifies the adapter, grading, and the
+dataset calibration):
 
 ```bash
-python -m evals.run_openai_eval --model openai:<id>    --out evals/results/runs/openai
-python -m evals.run_openai_eval --model anthropic:<id> --out evals/results/runs/anthropic
-python -m evals.run_openai_eval --model gemini:<id>    --out evals/results/runs/gemini
-# then: python -m evals.analyze_results --runs evals/results/runs/{openai,anthropic,gemini}
+python -m evals.run_openai_eval --model openai:gpt-4o-mini              --judge-model openai:gpt-4o-mini --out evals/results/runs/smoke-openai
+python -m evals.run_openai_eval --model anthropic:claude-haiku-4-5-20251001 --judge-model openai:gpt-4o-mini --out evals/results/runs/smoke-anthropic
+python -m evals.run_openai_eval --model gemini:gemini-2.5-flash          --judge-model openai:gpt-4o-mini --out evals/results/runs/smoke-gemini
+python -m evals.analyze_results --runs evals/results/runs/smoke-openai evals/results/runs/smoke-anthropic evals/results/runs/smoke-gemini --out evals/results/analysis/smoke
 ```
 
-Model ids are not hardcoded — pass whatever current id you want. Live runs cost
-money and need the matching key; tests/CI never call a provider (local fallback).
+Read `analysis/smoke/recommendations.md`. If failures point at the dataset or
+system prompt (owner `dataset`/`system_prompt`), fix those first — otherwise the
+flagship run just pays more to reproduce the same miscalibration.
+
+**Step 2 — flagship comparison** (only after the smoke looks right):
+
+```bash
+python -m evals.run_openai_eval --model openai:<flagship>    --judge-model openai:gpt-4o-mini --out evals/results/runs/openai
+python -m evals.run_openai_eval --model anthropic:<flagship> --judge-model openai:gpt-4o-mini --out evals/results/runs/anthropic
+python -m evals.run_openai_eval --model gemini:<flagship>    --judge-model openai:gpt-4o-mini --out evals/results/runs/gemini
+python -m evals.analyze_results --runs evals/results/runs/openai evals/results/runs/anthropic evals/results/runs/gemini --out evals/results/analysis/flagship
+```
+
+The scheduler stays local and mock — only the model *decision* comes from the
+API; tool execution and grading are local. Model ids are not hardcoded — pass
+whatever current id you want. Use **one fixed `--judge-model`** across all runs
+so the judge is consistent and no model grades its own answers. Tests/CI never
+call a provider (local fallback).
 
 Outputs land in the `--out` run directory:
 
@@ -118,6 +137,11 @@ Positive, negative, and safety cases are included (ask for a missing timezone;
 decline out-of-scope; surface `NOT_FOUND`; avoid admin/cross-user/secret
 requests). Exactly 10 scheduler cases set `grading.trace_track=true` for deeper
 trace inspection.
+
+**Email addresses are placeholders.** The `send_email` case uses the reserved
+test address `test@example.com` (RFC 2606) in both the prompt and the expected
+`action_params.to` — no real address is stored. Execution is a mock anyway (the
+`send_email` executor never contacts a mail server), so nothing is ever sent.
 
 ## Environment
 
