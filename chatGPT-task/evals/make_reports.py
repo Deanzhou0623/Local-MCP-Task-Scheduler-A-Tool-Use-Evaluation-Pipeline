@@ -83,12 +83,35 @@ def _fail_sets(runs: list[Path]) -> dict[str, tuple[set, dict]]:
     return out
 
 
+_SHORT = {"gpt-5": "gpt-5", "claude-opus-4-8": "opus-4.8",
+          "gemini-2.5-pro": "gemini-2.5"}
+
+
+def _short(model: str) -> str:
+    return _SHORT.get(model, model[:14])
+
+
+def _bar(value: float, vmax: float, width: int = 26) -> str:
+    n = int(round((value / vmax) * width)) if vmax else 0
+    n = max(0, min(width, n))
+    return "█" * n + "·" * (width - n)
+
+
+def _chart(title: str, rows: list[dict], key: str, vmax: float,
+           transform=float, fmt: str = "{:.3f}") -> list[str]:
+    labels = [_short(r["model"]) for r in rows]
+    lw = max(len(l) for l in labels)
+    out = [f"**{title}**", "", "```"]
+    for r in rows:
+        v = transform(r[key])
+        out.append(f"{_short(r['model']):<{lw}}  {_bar(v, vmax)}  {fmt.format(v)}")
+    out += ["```", ""]
+    return out
+
+
 def _final_report(runs: list[Path], analysis: Path) -> str:
     leaderboard = list(csv.DictReader(open(analysis / "model_leaderboard.csv")))
-    clusters = json.load(open(analysis / "failure_clusters.json"))
     trace = json.load(open(analysis / "trace_track_report.json"))
-    recs = (analysis / "recommendations.md").read_text() if (analysis / "recommendations.md").exists() else ""
-    n_fail = sum(1 for _ in open(analysis / "all_failures.jsonl"))
 
     lines = [
         "# Flagship Model Comparison — Final Report", "",
@@ -105,6 +128,21 @@ def _final_report(runs: list[Path], analysis: Path) -> str:
             f"| {r['rank']} | {r['model']} | {r['weighted_score']} | {r['pass_rate']} | "
             f"{r['safety_pass_rate']} | {r['time_match_rate']} | {r['mean_llm_judge_score']} | "
             f"{r['input_tokens_total']} | {r['output_tokens_total']} | {r['p95_latency_ms']} |")
+
+    # --- Diagrams -----------------------------------------------------------
+    out_per_case = lambda r: int(r["output_tokens_total"]) // 40
+    max_opc = max(out_per_case(r) for r in leaderboard) or 1
+    max_p95 = max(float(r["p95_latency_ms"]) for r in leaderboard) or 1
+    lines += ["", "## Diagrams", ""]
+    lines += _chart("Tool-use pass rate (higher = better)", leaderboard, "pass_rate", 1.0)
+    lines += _chart("Safety pass rate (higher = better)", leaderboard, "safety_pass_rate", 1.0)
+    lines += _chart("Time / timezone accuracy (higher = better)", leaderboard, "time_match_rate", 1.0)
+    lines += _chart("Final-answer judge score (higher = better)", leaderboard, "mean_llm_judge_score", 1.0)
+    lines += _chart("Output tokens per case (lower = leaner/cheaper)", leaderboard,
+                    "output_tokens_total", max_opc,
+                    transform=lambda v: int(v) // 40, fmt="{:.0f}")
+    lines += _chart("p95 latency ms (lower = faster)", leaderboard, "p95_latency_ms",
+                    max_p95, transform=float, fmt="{:.0f}")
 
     # --- Commonalities & differences (computed from the runs) --------------
     fs = _fail_sets(runs)
@@ -152,14 +190,55 @@ def _final_report(runs: list[Path], analysis: Path) -> str:
             f"{run['cases_with_run_id']} | {run['cases_with_scheduler_trace_id']} | "
             f"{', '.join(run['trace_track_failure_cases']) or '—'} |")
 
-    lines += ["", f"## Top failure clusters ({n_fail} total failures across models)", ""]
-    for c in clusters[:8]:
-        lines.append(
-            f"- **{c['failure_type']}** ×{c['count']} — models {', '.join(c['affected_models'])}; "
-            f"owner `{c['suggested_owner']}`; cases {', '.join(c['case_ids'])}")
+    # --- Conclusion (data-driven) ------------------------------------------
+    judge_name = json.load(open(runs[0] / "summary.json")).get("run", {}).get("judge", "?")
+    by_pass = sorted(leaderboard, key=lambda r: -float(r["pass_rate"]))
+    best_safety = max(leaderboard, key=lambda r: float(r["safety_pass_rate"]))
+    best_judge = max(leaderboard, key=lambda r: float(r["mean_llm_judge_score"]))
+    leanest = min(leaderboard, key=out_per_case)
+    verbose = max(leaderboard, key=out_per_case)
+    leader = leaderboard[0]
+    common_cats = sorted({any_cats[c] for c in common})
+    common_safety = sorted(c for c in common if any_cats.get(c, "").startswith("safety"))
+    spread = max_opc / (out_per_case(leanest) or 1)
 
-    lines += ["", "## Recommendations", ""]
-    lines += [l for l in recs.splitlines() if l.startswith("- From")]
+    lines += [
+        "", "## Conclusion", "",
+        f"**{leader['model']}** takes the top weighted score ({leader['weighted_score']}), on "
+        f"the strength of the best-or-tied tool-use pass rate ({leader['pass_rate']}) and top "
+        f"time accuracy ({leader['time_match_rate']}). But the three are close, and the "
+        "differences are trade-offs rather than a clear across-the-board winner:", "",
+        f"- **Most correct / consistent:** {_short(by_pass[0]['model'])} "
+        f"(pass {by_pass[0]['pass_rate']}).",
+        f"- **Safest:** {_short(best_safety['model'])} "
+        f"(safety {best_safety['safety_pass_rate']}).",
+        f"- **Best final-answer writer:** {_short(best_judge['model'])} "
+        f"(judge {best_judge['mean_llm_judge_score']}).",
+        f"- **Leanest / cheapest:** {_short(leanest['model'])} "
+        f"({out_per_case(leanest)} out-tok/case) vs most verbose {_short(verbose['model'])} "
+        f"({out_per_case(verbose)}).", "",
+        f"Shared weak spots across all three: {', '.join(common_cats)}. Pick by the axis you "
+        f"care about — correctness → {_short(by_pass[0]['model'])}, safety → "
+        f"{_short(best_safety['model'])}, cost/speed → {_short(leanest['model'])}.",
+    ]
+
+    # --- Worth exploring ---------------------------------------------------
+    lines += [
+        "", "## Worth exploring", "",
+        f"- **Judge quality vs tool correctness diverge.** {_short(best_judge['model'])} writes "
+        f"the best final answers (judge {best_judge['mean_llm_judge_score']}) yet is not the most "
+        f"correct ({best_judge['pass_rate']} pass) — do polished words mask wrong actions?",
+        f"- **~{spread:.0f}× spread in output tokens/case** ({out_per_case(leanest)} → {max_opc}) "
+        "at similar accuracy — is the verbose model's extra reasoning actually buying correctness?",
+        f"- **A shared safety blind spot:** all three miss the same {len(common_safety)} safety "
+        f"case(s) ({', '.join(common_safety) or '—'}) — capability gap or dataset ambiguity?",
+        "- **Dataset over-strictness inflates failures.** Several 'failures' are exact-string / "
+        "label mismatches, not wrong actions (a model got the email case right except subject/body "
+        "wording; another correctly refused an unsupported action) — what's the true ceiling under "
+        "looser grading?",
+        f"- **Self-judge bias:** the judge (`{judge_name}`) is itself in the lineup yet scored "
+        f"{_short(best_judge['model'])} highest — re-run with a neutral judge to confirm.",
+    ]
 
     lines += ["", "## Caveats", "",
               "- Judge = `claude-opus-4-8`, which is one of the compared models → "
@@ -179,8 +258,8 @@ def make_reports(run_dirs: list[str], analysis_dir: str, out_dir: str) -> list[s
         fname, content = _per_model_report(run)
         (out / fname).write_text(content)
         written.append(fname)
-    (out / "report-final-comparison.md").write_text(_final_report(runs, Path(analysis_dir)))
-    written.append("report-final-comparison.md")
+    (out / "report-final-report.md").write_text(_final_report(runs, Path(analysis_dir)))
+    written.append("report-final-report.md")
     return written
 
 

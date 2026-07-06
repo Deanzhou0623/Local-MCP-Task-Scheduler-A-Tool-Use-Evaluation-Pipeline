@@ -43,7 +43,7 @@
 - Failed graders: action_params_match, final_answer_consistent
 - Expected: tool=`task_create_v1` action=`send_email` time=`2026-06-15T20:30:00-07:00`
 - Actual: tool=`task_create_v1` action=`send_email` time=`2026-06-15T20:30:00-07:00`
-- Final answer: "Done! I've scheduled an email reminder for today at 8:30 PM (Pacific):  - **To:** test@example.com - **Subject:** Reminder: Review the project - **Send time:** 2026-06-15 at 8:30 "
+- Final answer: "Done! I've scheduled an email reminder for today at 8:30 PM (Pacific):  - **To:** test@example.com - **Subject:** Reminder: Review the project - **Send time:** 2026-06-15 at 8:30 P"
 
 ### `create_recurring_hard_biweekly_009` — create_recurring
 - Failed graders: tool_name_match, required_tool_called, action_match, job_type_match, time_match, timezone_match, tool_result_success
